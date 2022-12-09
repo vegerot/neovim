@@ -11,12 +11,12 @@ if exists("b:current_syntax")
   finish
 endif
 
-syn match hgcommitComment "^\(SL\|HG\): .*$"             contains=@NoSpell
-syn match hgcommitUser    "^\(SL\|HG\): user: \zs.*$"   contains=@NoSpell contained containedin=hgcommitComment
-syn match hgcommitBranch  "^\(SL\|HG\): branch \zs.*$"  contains=@NoSpell contained containedin=hgcommitComment
-syn match hgcommitAdded   "^\(SL\|HG\): \zsadded .*$"   contains=@NoSpell contained containedin=hgcommitComment
-syn match hgcommitChanged "^\(SL\|HG\): \zschanged .*$" contains=@NoSpell contained containedin=hgcommitComment
-syn match hgcommitRemoved "^\(SL\|HG\): \zsremoved .*$" contains=@NoSpell contained containedin=hgcommitComment
+syn match hgcommitComment "^\%(SL\|HG\): .*$"             contains=@NoSpell
+syn match hgcommitUser    "^\%(SL\|HG\): user: \zs.*$"   contains=@NoSpell contained containedin=hgcommitComment
+syn match hgcommitBranch  "^\%(SL\|HG\): branch \zs.*$"  contains=@NoSpell contained containedin=hgcommitComment
+syn match hgcommitAdded   "^\%(SL\|HG\): \zsadded .*$"   contains=@NoSpell contained containedin=hgcommitComment
+syn match hgcommitChanged "^\%(SL\|HG\): \zschanged .*$" contains=@NoSpell contained containedin=hgcommitComment
+syn match hgcommitRemoved "^\%(SL\|HG\): \zsremoved .*$" contains=@NoSpell contained containedin=hgcommitComment
 
 syn region gitcommitDiff start=/\%(^\(SL\|HG\): diff --\%(git\|cc\|combined\) \)\@=/ end=/^\%(diff --\|$\|@@\@!\|[^[:alnum:]\ +-]\S\@!\)\@=/ fold contains=@gitcommitDiff
 syn include @gitcommitDiff syntax/hgcommitDiff.vim
