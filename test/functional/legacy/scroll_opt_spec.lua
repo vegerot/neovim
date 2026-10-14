@@ -1,6 +1,8 @@
 local n = require('test.functional.testnvim')()
+local t = require('test.testutil')
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local exec = n.exec
 local feed = n.feed
@@ -1243,7 +1245,6 @@ describe('smoothscroll', function()
                                               |
     ]])
     exec('set showtabline=2')
-    feed('<C-E>')
     screen:expect([[
       {5: }{100:2}{5:+ [No Name] }{2:                          }|
       {1:<<<}e text with some text with some text |
@@ -1259,7 +1260,7 @@ describe('smoothscroll', function()
                                               |
     ]])
     exec('set winbar=winbar')
-    feed('<C-w>k<C-E>')
+    feed('<C-w>k')
     screen:expect([[
       {5: }{100:2}{5:+ [No Name] }{2:                          }|
       {5:winbar                                  }|
@@ -1597,5 +1598,52 @@ describe('scrolloffpad', function()
     exec('normal! zc')
     exec('normal! G')
     screen:expect(s1)
+  end)
+
+  it("uses the target window's value, not the current window's", function()
+    exec([[
+      set scrolloff=10 scrolloffpad=0
+      enew!
+      call setline(1, map(range(1, 100), 'printf("line %d", v:val)'))
+      split
+      setlocal scrolloffpad=5
+      normal! G
+      wincmd j
+      silent 1,60d
+    ]])
+    -- The upper window turned 'scrolloffpad' on for itself, so its own value
+    -- decides how far its cursor is padded from the end of the buffer, even
+    -- though the current window leaves the option at the global 0.
+    t.eq(36, n.fn.line('w0', n.fn.win_getid(1)))
+  end)
+end)
+
+describe('scroll_cursor_halfway()', function()
+  local screen
+
+  before_each(function()
+    screen = Screen.new(40, 12)
+  end)
+
+  it('weighs lines by their screen height', function()
+    exec([[
+      set nosmoothscroll scrolloff=0
+      call setline(1, map(range(1, 20), '"short " .. v:val'))
+      call append(20, 'CURSOR')
+      call append(21, map(range(1, 8), 'repeat("x", 200)'))
+    ]])
+    feed('21Gzz')
+    -- The lines below the cursor wrap to five rows each, so only one of them
+    -- fits under the cursor once it sits on row 6 of this 11 row window.
+    screen:expect([[
+      short 16                                |
+      short 17                                |
+      short 18                                |
+      short 19                                |
+      short 20                                |
+      ^CURSOR                                  |
+      xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|*5
+                                              |
+    ]])
   end)
 end)

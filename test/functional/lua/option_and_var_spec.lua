@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, pending = t.describe, t.it, t.before_each, t.pending
 local NIL = vim.NIL
 local feed = n.feed
 local command = n.command
@@ -896,6 +897,37 @@ describe('lua stdlib', function()
           end)
         end)
 
+        it("returns structured values for a dict option ('diffopt')", function()
+          -- Bare flags -> true; sub-values stay strings (option sub-value types are not exposed).
+          eq_exec_lua({ internal = true, filler = true, context = '4' }, function()
+            vim.opt.diffopt = 'internal,filler,context:4'
+            return vim.opt.diffopt:get()
+          end)
+        end)
+
+        it('roundtrips a dict option through :set', function()
+          eq_exec_lua('context:4,filler,internal', function()
+            vim.opt.diffopt = 'internal,filler,context:4'
+            vim.opt.diffopt = vim.opt.diffopt:get()
+            return vim.go.diffopt
+          end)
+        end)
+
+        -- Dict option accepts a table and :get() returns a map. #18875
+        it("roundtrips a window-local dict option ('breakindentopt')", function()
+          eq_exec_lua({ sbr = true, shift = '3' }, function()
+            vim.opt.breakindentopt = { sbr = true, shift = 3 }
+            return vim.opt.breakindentopt:get()
+          end)
+        end)
+
+        it("roundtrips a table for 'mousescroll'", function()
+          eq_exec_lua({ hor = '6', ver = '3' }, function()
+            vim.opt.mousescroll = { hor = 6, ver = 3 }
+            return vim.opt.mousescroll:get()
+          end)
+        end)
+
         it('works for key-value pair options', function()
           eq_exec_lua({ tab = '> ', space = '_' }, function()
             vim.opt.listchars = 'tab:> ,space:_'
@@ -963,6 +995,12 @@ describe('lua stdlib', function()
             vim.opt.listchars = vim.opt.listchars - 'space'
             return vim.o.listchars
           end)
+
+          eq_exec_lua('tab:>-', function()
+            vim.opt.listchars = { tab = '>-', eol = '~', space = '.' }
+            vim.opt.listchars:remove { 'eol', 'space' } -- Removes by key.
+            return vim.o.listchars
+          end)
         end)
 
         it('does not allow subtracting dict style multiple times', function()
@@ -1018,10 +1056,24 @@ describe('lua stdlib', function()
       end)
 
       it('automatically sets when calling remove with a table', function()
-        eq_exec_lua('foo', function()
+        eq_exec_lua('bar', function()
           vim.opt.wildignore = 'foo,bar,baz'
-          vim.opt.wildignore:remove { 'bar', 'baz' }
+          vim.opt.wildignore:remove { 'foo', 'baz' } -- *Non-adjacent* items too.
           return vim.o.wildignore
+        end)
+      end)
+
+      it('removes flags from a set when calling remove with a table: #41953', function()
+        eq_exec_lua({ j = true, q = true, l = true }, function()
+          vim.opt.formatoptions = 'jcqrol'
+          vim.opt.formatoptions:remove { 'c', 'r', 'o' } -- *Non-adjacent* flags too.
+          return vim.opt.formatoptions:get()
+        end)
+
+        eq_exec_lua('jql', function()
+          vim.opt.formatoptions = 'jcqrol'
+          vim.opt.formatoptions:remove { c = true, r = true, o = true } -- Set style.
+          return vim.o.formatoptions
         end)
       end)
 
@@ -1248,17 +1300,17 @@ describe('lua stdlib', function()
         end)
       end)
 
-      -- isfname=a,b,c,,,d,e,f
+      -- The raw string keeps the ",," literal-comma convention; the structured view splits on every
+      -- comma and does not reconstruct literal commas.
       it('can handle isfname ,,,', function()
-        eq_exec_lua({ { ',', 'a', 'b', 'c' }, 'a,b,,,c' }, function()
+        eq_exec_lua({ { 'a', 'b', 'c' }, 'a,b,,,c' }, function()
           vim.opt.isfname = 'a,b,,,c'
           return { vim.opt.isfname:get(), vim.go.isfname }
         end)
       end)
 
-      -- isfname=a,b,c,^,,def
       it('can handle isfname ,^,,', function()
-        eq_exec_lua({ { '^,', 'a', 'b', 'c' }, 'a,b,^,,c' }, function()
+        eq_exec_lua({ { 'a', 'b', '^', 'c' }, 'a,b,^,,c' }, function()
           vim.opt.isfname = 'a,b,^,,c'
           return { vim.opt.isfname:get(), vim.go.isfname }
         end)
@@ -1346,6 +1398,14 @@ describe('lua stdlib', function()
           vim.opt_local.tags:append('baz')
           vim.opt_local.tags:append('qux')
           return vim.bo.tags
+        end)
+      end)
+
+      it('removes a table of flags from a flag-list option: #41953', function()
+        eq_exec_lua('jql', function()
+          vim.opt_local.formatoptions = 'jcqrol'
+          vim.opt_local.formatoptions:remove { 'c', 'r', 'o' } -- *Non-adjacent* flags too.
+          return vim.bo.formatoptions
         end)
       end)
     end)

@@ -136,6 +136,7 @@ what kind of file it is.  This doesn't always work.  A number of global
 variables can be used to overrule the filetype used for certain extensions:
 
 	file name	variable ~
+	`*.al`		g:filetype_al
 	`*.app`		g:filetype_app
 	`*.as`		g:filetype_as
 	`*.asa`		g:filetype_asa		|ft-aspperl-syntax|
@@ -153,7 +154,11 @@ variables can be used to overrule the filetype used for certain extensions:
 	`*.f`		g:filetype_f		|ft-forth-syntax|
 	`*.frm`		g:filetype_frm		|ft-form-syntax|
 	`*.fs`		g:filetype_fs		|ft-forth-syntax|
-	`*.h`		g:c_syntax_for_h	|ft-c-syntax|
+	`*.h`		g:c_syntax_for_h	|ft-c-syntax|	(deprecated)
+	`*.h`		g:ch_syntax_for_h	|ft-ch-syntax|	(deprecated)
+	`*.h`		g:filetype_h		|ft-c-syntax|
+						|ft-ch-syntax|
+						|ft-cpp-syntax|
 	`*.i`		g:filetype_i		|ft-progress-syntax|
 	`*.inc`		g:filetype_inc
 	`*.int`		g:filetype_int
@@ -770,6 +775,15 @@ To force another recomputation, do: >
 [0] https://html.spec.whatwg.org/multipage/syntax.html#optional-tags
 [1] https://en.wikipedia.org/wiki/Dangling_else
 
+ICALENDAR			    *ft-icalendar-plugin* *g:icalendar_folding*
+
+You can enable folding of iCalendar components (BEGIN: and END: pairs)
+using |fold-expr| by: >
+
+	let g:icalendar_folding = 1
+<
+Nested components, such as a VALARM inside a VEVENT, produce nested folds.
+
 IDRIS2							*ft-idris2-plugin*
 
 By default the following options are set: >
@@ -786,14 +800,14 @@ in your vimrc: >
 
 JAVA							*ft-java-plugin*
 
+						*g:ftplugin_java_source_path*
 Whenever the variable "g:ftplugin_java_source_path" is defined and its value
 is a filename whose extension is either ".jar" or ".zip", e.g.: >
 	let g:ftplugin_java_source_path = '/path/to/src.jar'
 	let g:ftplugin_java_source_path = '/path/to/src.zip'
 <
-and the |zip| plugin has already been sourced, the |gf| command can be used to
-open the archive and the |n| command can be used to look for the selected type
-and the <Return> key can be used to load a listed file.
+and a zip plugin has already been sourced, the |gf| command can be used to open
+the selected entry.
 
 Note that the effect of using the "gf" command WITHIN a buffer loaded with the
 Zip plugin depends on the version of the Zip plugin.  For the Zip plugin

@@ -1,6 +1,7 @@
 -- Tests for vim.ui.select(), including integration with builtins (:tselect, z=).
 
 local t = require('test.testutil')
+local describe, it, before_each, finally = t.describe, t.it, t.before_each, t.finally
 local retry = t.retry
 local n = require('test.functional.testnvim')()
 local clear = n.clear
@@ -226,6 +227,37 @@ describe('vim.ui.select()', function()
       eq('spell', got.kind)
       t.matches('helo', got.prompt)
       eq(got.items[1].word, api.nvim_buf_get_lines(0, 0, -1, false)[1])
+    end)
+
+    it('does not produce E315 when picker changes the current window', function()
+      prepare_test()
+
+      api.nvim_buf_set_lines(0, 0, -1, false, {
+        'Praesent enim diam,',
+        'Praesent enim diam,',
+        'Praesent enim diam,',
+        'Praesent enim diam,',
+        'Praesent enim diam,',
+      })
+      -- Keep the cursor beyond the popup's single line to reproduce E315.
+      api.nvim_win_set_cursor(0, { 5, 0 })
+
+      exec_lua(function()
+        vim.ui.select = function()
+          local buf = vim.api.nvim_create_buf(false, true)
+
+          vim.api.nvim_open_win(buf, true, {
+            row = 10,
+            col = 10,
+            height = 10,
+            width = 10,
+            relative = 'editor',
+            style = 'minimal',
+          })
+        end
+
+        vim.cmd('normal! wz=')
+      end)
     end)
 
     it('does nothing when the user cancels', function()

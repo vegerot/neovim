@@ -3,6 +3,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local t_shada = require('test.functional.shada.testutil')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local nvim_command, eq = n.command, t.eq
 local reset, clear, get_shada_rw = t_shada.reset, t_shada.clear, t_shada.get_shada_rw
 
@@ -397,6 +398,15 @@ describe('ShaDa error handling', function()
 
   it('fails on history item with FIXUINT second item', function()
     wshada('\004\000\003\146\000\000')
+    eq(
+      'Vim(rshada):E575: Error while reading ShaDa file: history entry at position 0 has wrong history string type',
+      t.pcall_err(nvim_command, sdrcmd())
+    )
+  end)
+
+  it('fails on history item with truncated string', function()
+    -- The string header declares five bytes, but only four follow it.
+    wshada('\004\000\007\146\000\165AAAA')
     eq(
       'Vim(rshada):E575: Error while reading ShaDa file: history entry at position 0 has wrong history string type',
       t.pcall_err(nvim_command, sdrcmd())

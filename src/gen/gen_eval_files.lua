@@ -26,6 +26,7 @@ local TEXT_WIDTH = 78
 --- @field since integer
 
 local LUA_API_RETURN_OVERRIDES = {
+  nvim_parse_cmd = 'vim.api.keyset.cmd_ret',
   nvim_win_get_config = 'vim.api.keyset.win_config_ret',
 }
 
@@ -98,7 +99,7 @@ local function split(x, sep)
 end
 
 --- @param f string
---- @param params [string,string][]|true
+--- @param params [string,string,string?][]|true
 --- @return string
 local function render_fun_sig(f, params)
   local param_str --- @type string
@@ -107,7 +108,7 @@ local function render_fun_sig(f, params)
   else
     param_str = table.concat(
       vim.tbl_map(
-        --- @param v [string,string]
+        --- @param v [string,string,string?]
         --- @return string
         function(v)
           return luaescape(v[1])
@@ -126,8 +127,8 @@ local function render_fun_sig(f, params)
 end
 
 --- Uniquify names
---- @param params [string,string,string][]
---- @return [string,string,string][]
+--- @param params [string,string,string?][]
+--- @return [string,string,string?][]
 local function process_params(params)
   local seen = {} --- @type table<string,true>
   local sfx = 1
@@ -192,7 +193,7 @@ local function get_api_meta()
       sees[#sees + 1] = see.desc
     end
 
-    local params = {} --- @type [string,string][]
+    local params = {} --- @type [string,string,string?][]
     for _, p in ipairs(fun.params) do
       params[#params + 1] = {
         p.name,
@@ -447,14 +448,27 @@ local function get_eval_meta()
   return require('nvim.eval').funcs
 end
 
+--- Group suffix variants for Lua metadata; Vimdoc keeps separate entries.
+--- @return table<string, vim.EvalFn[]>
+local function get_eval_lua_meta()
+  local ret = {} --- @type table<string, vim.EvalFn[]>
+  -- Sorting puts the base declaration before its __N variants.
+  for name, fun in vim.spairs(get_eval_meta()) do
+    if fun.lua ~= false then
+      local base = name:match('^(.-)__%d+$') or name
+      ret[base] = ret[base] or {}
+      table.insert(ret[base], fun)
+    end
+  end
+  return ret
+end
+
 --- Generates LuaLS docstring for a Vimscript "eval" function.
 --- @param f string
---- @param fun vim.EvalFn
+--- @param funs vim.EvalFn[]
 --- @param write fun(line: string)
-local function render_eval_meta(f, fun, write)
-  if fun.lua == false then
-    return
-  end
+local function render_eval_meta(f, funs, write)
+  local fun = assert(funs[1])
 
   local funname = fun.name or f
   local params = process_params(fun.params)
@@ -464,16 +478,18 @@ local function render_eval_meta(f, fun, write)
     write('--- @deprecated')
   end
 
-  render_eval_see_lua_meta(fun, write)
+  -- Combine descriptions into one docstring: the base first, then its __N variants.
+  for _, variant in ipairs(funs) do
+    render_eval_see_lua_meta(variant, write)
 
-  local desc = fun.desc --[[@as string?]]
+    local desc = variant.desc --[[@as string?]]
 
-  if desc then
-    --- @type string
-    desc = desc:gsub('\n%s*\n%s*$', '\n')
-    for _, l in ipairs(split(desc)) do
-      l = l:gsub('^      ', ''):gsub('\t', '  '):gsub('@', '\\@')
-      write('--- ' .. l)
+    if desc then
+      desc = desc:gsub('\n%s*\n%s*$', '\n')
+      for _, l in ipairs(split(desc)) do
+        l = l:gsub('^      ', ''):gsub('\t', '  '):gsub('@', '\\@')
+        write('--- ' .. l)
+      end
     end
   end
 
@@ -481,6 +497,24 @@ local function render_eval_meta(f, fun, write)
     ipairs(vim.fn.reverse(fun.generics or {} --[[@as string[] ]]))
   do
     write(fmt('--- @generic %s', text))
+  end
+
+  -- E.g. sign_undefine__1 becomes @overload fun(list?: string[]): (integer[]).
+  for i, overload in ipairs(funs) do
+    if i > 1 then
+      local overload_params = {} --- @type string[]
+      local req_args = type(overload.args) == 'table' and overload.args[1] or overload.args or 0
+      for j, param in ipairs(process_params(overload.params)) do
+        local pname, ptype = luaescape(param[1]), param[2]
+        local optional = (pname ~= '...' and j > req_args) and '?' or ''
+        overload_params[#overload_params + 1] = fmt('%s%s: %s', pname, optional, ptype)
+      end
+      local generics = overload.generics and ('<' .. table.concat(overload.generics, ', ') .. '>')
+        or ''
+      -- Group the return list so a type like (0|-1)[] remains one array return.
+      local ret = overload.returns == false and '' or ': (' .. (overload.returns or 'any') .. ')'
+      write(fmt('--- @overload fun%s(%s)%s', generics, table.concat(overload_params, ', '), ret))
+    end
   end
 
   local req_args = type(fun.args) == 'table' and fun.args[1] or fun.args or 0
@@ -571,6 +605,12 @@ local function render_eval_doc(f, fun, write)
     write('')
   end
 
+  if fun.fast then
+    write(util.md_to_vimdoc('Attributes: ~', 16, 16, TEXT_WIDTH))
+    write(util.md_to_vimdoc('|api-fast|', 18, 18, TEXT_WIDTH))
+    write('')
+  end
+
   if #params > 0 then
     write(util.md_to_vimdoc('Parameters: ~', 16, 16, TEXT_WIDTH))
     for i, param in ipairs(params) do
@@ -651,11 +691,18 @@ local function render_option_meta(_f, opt, write)
     write('--- ' .. l)
   end
 
-  if opt.type == 'string' and not opt.list and opt.values then
-    local values = {} --- @type string[]
-    for _, e in ipairs(opt.values) do
-      values[#values + 1] = fmt("'%s'", e)
+  -- A non-list string option with a fixed value set (e.g. 'ambiwidth', 'tagcase') documents its
+  -- exact value union; everything else uses its Lua type.
+  local values = {} --- @type string[]
+  if opt.type == 'string' and not opt.list and opt.schema then
+    for _, v in ipairs(require('nvim.options').schema_values(opt.schema)) do
+      values[#values + 1] = fmt("'%s'", v)
     end
+  end
+  if opt.type == 'func' or opt.type == 'expr' then
+    -- "Callback" option ('operatorfunc', 'foldexpr', …).
+    write('--- @type string|function')
+  elseif #values > 0 then
     write('--- @type ' .. table.concat(values, '|'))
   else
     write('--- @type ' .. OPTION_TYPES[opt.type])
@@ -869,7 +916,8 @@ local function render_option_doc(_f, opt, write)
     name_str = fmt("'%s'", opt.full_name)
   end
 
-  local otype = opt.type == 'boolean' and 'boolean' or opt.type
+  -- Callback (func/expr) options are labeled "string" in the help, their ":set" form.
+  local otype = (opt.type == 'func' or opt.type == 'expr') and 'string' or opt.type
   if opt.defaults.doc or opt.defaults.if_true ~= nil or opt.defaults.meta ~= nil then
     local v = render_option_default(opt.defaults --[[@as vim.option_defaults]], true)
     local pad = string.rep('\t', math.max(1, math.ceil((24 - #name_str) / 8)))
@@ -949,7 +997,7 @@ local CONFIG = {
   {
     path = 'runtime/lua/vim/_meta/vimfn.gen.lua',
     header = LUA_META_HEADER,
-    funcs = get_eval_meta,
+    funcs = get_eval_lua_meta,
     render = render_eval_meta,
   },
   {

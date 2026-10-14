@@ -86,8 +86,10 @@ modes.
 			Remove the mapping of {lhs} for the modes where the
 			map command applies.  The mapping may remain defined
 			for other modes where it applies.
-			It also works when {lhs} matches the {rhs} of a
-			mapping.  This is for when an abbreviation applied.
+			If no mapping with {lhs} exists, it also works when
+			{lhs} matches the {rhs} of a mapping (see
+			|vim.keymap.del()| to avoid that).  This is for
+			when an abbreviation applied.
 			Note: Trailing spaces are included in the {lhs}.
 			See |map-trailing-white|.
 
@@ -459,7 +461,8 @@ that operates on a function name in the current line: >
 	onoremap <silent> F :<C-U>normal! 0f(hviw<CR>
 The CTRL-U (<C-U>) is used to remove the range that Vim may insert.  The
 Normal mode commands find the first '(' character and select the first word
-before it.  That usually is the function name.
+(usually is the function name) before it.  The operator does not change the
+Visual marks |'<| |'>|. |gv|
 
 To enter a mapping for Normal and Visual mode, but not Operator-pending mode,
 first define it for all three modes, then unmap it for

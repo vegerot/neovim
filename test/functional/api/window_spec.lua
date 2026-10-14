@@ -1,7 +1,10 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
+local tt = require('test.functional.testterm')
 
+local describe, it, before_each, after_each, finally =
+  t.describe, t.it, t.before_each, t.after_each, t.finally
 local clear, curbuf, curbuf_contents, curwin, eq, neq, matches, ok, feed, insert, eval =
   n.clear,
   n.api.nvim_get_current_buf,
@@ -45,14 +48,17 @@ describe('API/win', function()
     it('works', function()
       command('new')
       local windows = api.nvim_list_wins()
-      neq(api.nvim_win_get_buf(windows[2]), api.nvim_win_get_buf(windows[1]))
+      neq(api.nvim_win_get_buf(windows[1]), api.nvim_win_get_buf(windows[2]))
       api.nvim_win_set_buf(windows[2], api.nvim_win_get_buf(windows[1]))
-      eq(api.nvim_win_get_buf(windows[2]), api.nvim_win_get_buf(windows[1]))
+      eq(api.nvim_win_get_buf(windows[1]), api.nvim_win_get_buf(windows[2]))
     end)
 
     it('validates args', function()
       eq('Invalid buffer id: 23', pcall_err(api.nvim_win_set_buf, api.nvim_get_current_win(), 23))
       eq('Invalid window id: 23', pcall_err(api.nvim_win_set_buf, 23, api.nvim_get_current_buf()))
+      -- When both are invalid the window is reported, so the message allocated
+      -- for it is not overwritten and leaked.
+      eq('Invalid window id: 23', pcall_err(api.nvim_win_set_buf, 23, 24))
     end)
 
     it('in cmdwin #40312', function()
@@ -67,9 +73,9 @@ describe('API/win', function()
       })
       feed('q:')
       n.poke_eventloop()
-      -- Replacing the cmdwin's own buffer is blocked by 'winfixbuf'.
-      matches('winfixbuf', pcall_err(api.nvim_win_set_buf, 0, new_buf))
-      -- But other windows can be touched freely.
+      -- Replacing the cmdwin's own buffer is allowed.
+      api.nvim_win_set_buf(0, new_buf)
+      -- Also other windows can be touched freely.
       local next_buf = api.nvim_create_buf(true, true)
       api.nvim_win_set_buf(new_win, next_buf)
       eq(next_buf, api.nvim_win_get_buf(new_win))
@@ -558,14 +564,14 @@ describe('API/win', function()
       api.nvim_set_option_value('statusline', 'window-status', { win = 0 })
       eq('window-status', api.nvim_get_option_value('statusline', { win = 0 }))
       eq(
-        "%<%f %{%nvim_eval_statusline('%h%w%m%r', {'maxwidth': 30}).width > 0 ? '%h%w%m%r ' : ''%}%=%{% &showcmdloc == 'statusline' ? '%-10.S ' : '' %}%{% exists('b:keymap_name') ? '<'..b:keymap_name..'> ' : '' %}%{% &ruler ? ( &rulerformat == '' ? '%-14.(%l,%c%V%) %P' : &rulerformat ) : '' %}",
+        "%<%f %{%nvim_eval_statusline('%h%w%m%r', {'maxwidth': 30}).width > 0 ? '%h%w%m%r ' : ''%}%=%{% &showcmdloc == 'statusline' ? '%-10.S ' : '' %}%{% exists('b:keymap_name') ? '<'..b:keymap_name..'> ' : '' %}%{% &ruler ? &rulerformat : '' %}",
         api.nvim_get_option_value('statusline', { scope = 'global' })
       )
       command('set modified')
       command('enew') -- global-local: not preserved in new buffer
       -- confirm local value was not copied
       eq(
-        "%<%f %{%nvim_eval_statusline('%h%w%m%r', {'maxwidth': 30}).width > 0 ? '%h%w%m%r ' : ''%}%=%{% &showcmdloc == 'statusline' ? '%-10.S ' : '' %}%{% exists('b:keymap_name') ? '<'..b:keymap_name..'> ' : '' %}%{% &ruler ? ( &rulerformat == '' ? '%-14.(%l,%c%V%) %P' : &rulerformat ) : '' %}",
+        "%<%f %{%nvim_eval_statusline('%h%w%m%r', {'maxwidth': 30}).width > 0 ? '%h%w%m%r ' : ''%}%=%{% &showcmdloc == 'statusline' ? '%-10.S ' : '' %}%{% exists('b:keymap_name') ? '<'..b:keymap_name..'> ' : '' %}%{% &ruler ? &rulerformat : '' %}",
         api.nvim_get_option_value('statusline', { win = 0 })
       )
       eq('', eval('&l:statusline'))
@@ -648,13 +654,13 @@ describe('API/win', function()
     end)
   end)
 
-  describe('get_position', function()
+  describe('get_tabpage', function()
     it('works', function()
       command('tabnew')
       command('vsplit')
-      eq(api.nvim_win_get_tabpage(api.nvim_list_wins()[1]), api.nvim_list_tabpages()[1])
-      eq(api.nvim_win_get_tabpage(api.nvim_list_wins()[2]), api.nvim_list_tabpages()[2])
-      eq(api.nvim_win_get_tabpage(api.nvim_list_wins()[3]), api.nvim_list_tabpages()[2])
+      eq(api.nvim_list_tabpages()[1], api.nvim_win_get_tabpage(api.nvim_list_wins()[1]))
+      eq(api.nvim_list_tabpages()[2], api.nvim_win_get_tabpage(api.nvim_list_wins()[2]))
+      eq(api.nvim_list_tabpages()[2], api.nvim_win_get_tabpage(api.nvim_list_wins()[3]))
     end)
   end)
 
@@ -755,24 +761,28 @@ describe('API/win', function()
       eq('', fn.getcmdwintype())
     end)
 
-    it('closing current (float) window of another tabpage #15313', function()
+    it('closing current (float) window of another tabpage #15313 #40745', function()
       command('tabedit')
       command('botright split')
       local prevwin = curwin()
       eq(2, eval('tabpagenr()'))
-      local win = api.nvim_open_win(0, true, {
-        relative = 'editor',
-        row = 10,
-        col = 10,
-        width = 50,
-        height = 10,
-      })
+      local opts = { relative = 'editor', row = 10, col = 10, width = 50, height = 10 }
+      local win = api.nvim_open_win(0, true, opts)
       local tab = eval('tabpagenr()')
       command('tabprevious')
       eq(1, eval('tabpagenr()'))
       api.nvim_win_close(win, false)
 
       eq(prevwin, api.nvim_tabpage_get_win(tab))
+      assert_alive()
+
+      command('tabnext')
+      local win1 = api.nvim_open_win(0, true, opts)
+      local win2 = api.nvim_open_win(0, true, opts)
+      command('tabprevious')
+      -- win1 becomes the tabpage's current window after win2 is closed
+      api.nvim_win_close(win2, false)
+      api.nvim_win_close(win1, false)
       assert_alive()
     end)
 
@@ -1686,8 +1696,8 @@ describe('API/win', function()
         row = 1,
         col = 1,
       })
-      eq(api.nvim_win_get_tabpage(win), first_tab)
-      eq(api.nvim_get_current_tabpage(), new_tab)
+      eq(first_tab, api.nvim_win_get_tabpage(win))
+      eq(new_tab, api.nvim_get_current_tabpage())
     end)
 
     it('switches to new windows in non-current tabpages when enter=true', function()
@@ -1702,8 +1712,8 @@ describe('API/win', function()
         row = 1,
         col = 1,
       })
-      eq(api.nvim_win_get_tabpage(win), first_tab)
-      eq(api.nvim_get_current_tabpage(), first_tab)
+      eq(first_tab, api.nvim_win_get_tabpage(win))
+      eq(first_tab, api.nvim_get_current_tabpage())
     end)
 
     local function setup_tabbed_autocmd_test()
@@ -2301,6 +2311,51 @@ describe('API/win', function()
                     |*4
         {2:[No Name]   }|
                     |
+      ]])
+    end)
+
+    it('keep focus when creating split window with enter=false in init script', function()
+      local script_file = 'Xstartup.lua'
+      t.write_file(
+        script_file,
+        [[
+        vim.o.laststatus = 0
+        local enter = vim.g.test_enter
+        local win = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), enter, {
+          split = 'left',
+          win = 0,
+        })
+      ]]
+      )
+      finally(function()
+        os.remove(script_file)
+      end)
+      local screen = tt.setup_child_nvim({
+        '--clean',
+        '--cmd',
+        'let g:test_enter = v:false',
+        '-u',
+        script_file,
+      })
+      screen:expect([[
+                                 │^                        |
+        ~                        │~                       |*4
+                                        0,0-1          All|
+        {5:-- TERMINAL --}                                    |
+      ]])
+      screen:detach()
+      screen = tt.setup_child_nvim({
+        '--clean',
+        '--cmd',
+        'let g:test_enter = v:true',
+        '-u',
+        script_file,
+      })
+      screen:expect([[
+        ^                         │                        |
+        ~                        │~                       |*4
+                                        0,0-1          All|
+        {5:-- TERMINAL --}                                    |
       ]])
     end)
   end)
@@ -3767,6 +3822,24 @@ describe('API/win', function()
   end)
 
   describe('nvim_win_call', function()
+    it('restores prevwin', function()
+      local w1 = api.nvim_get_current_win()
+      command('split')
+      local w2 = api.nvim_get_current_win()
+      command('split')
+      local w3 = api.nvim_get_current_win()
+      -- Entry state: curwin=w3, prevwin=w2.
+      eq(w2, fn.win_getid(fn.winnr('#')))
+      exec_lua(function()
+        vim.api.nvim_win_call(w1, function()
+          vim.api.nvim_set_current_win(w2) -- changes prevwin to w1
+        end)
+      end)
+      -- No evidence of the context-switch; curwin/prevwin are restored.
+      eq(w3, api.nvim_get_current_win())
+      eq(w2, fn.win_getid(fn.winnr('#')))
+    end)
+
     it('supports multiple returns', function()
       local cur = api.nvim_get_current_win()
       local other = api.nvim_open_win(api.nvim_create_buf(false, true), false, { split = 'left' })

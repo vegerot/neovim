@@ -14,7 +14,7 @@
 --- @field generics? string[] Used to write `---@generic` annotations over a function.
 --- @field signature? string
 --- @field desc? string
---- @field params [string, string, string][]
+--- @field params [string, string, string?][] Each entry is `{name, type, desc?}`; `desc` is only present in API-meta entries.
 --- @field notes? string[]
 --- @field see? string[]
 ---
@@ -823,7 +823,9 @@ M.funcs = {
     desc = [=[
       The result is the name of a buffer.  Mostly as it is displayed
       by the `:ls` command, but not using special names such as
-      "[No Name]".
+      "[No Name]".  If the buffer represents a directory, the name
+      ends with a path separator, unless it was changed by |:file| or
+      |nvim_buf_set_name()|.
       If {buf} is omitted the current buffer is used.
       If {buf} is a Number, that buffer number's name is given.
       Number zero is the alternate buffer for the current window.
@@ -1111,9 +1113,12 @@ M.funcs = {
       See |channel-bytes| for more information.
 
       {data} may be a string, string convertible, |Blob|, or a list.
+
       If {data} is a list, the items will be joined by newlines; any
-      newlines in an item will be sent as NUL. To send a final
-      newline, include a final empty string. Example: >vim
+      newlines in an item will be sent as NUL; to send a final
+      newline, include a final empty string. |NL-used-for-Nul|
+
+      Example: >vim
       	call chansend(id, ["abc", "123\n456", ""])
       <will send "abc<NL>123<NUL>456<NL>".
 
@@ -1123,9 +1128,9 @@ M.funcs = {
     ]=],
     name = 'chansend',
     params = { { 'id', 'number' }, { 'data', 'string|string[]' } },
-    returns = '0|1',
+    returns = 'integer',
     signature = 'chansend({id}, {data})',
-    see_lua = { '|nvim_chan_send()| for string data; list input and the return value differ' },
+    see_lua = { '|nvim_chan_send()| for string (binary) data' },
   },
   char2nr = {
     args = { 1, 2 },
@@ -1231,6 +1236,7 @@ M.funcs = {
       	echo charidx('a😊😊', 4, 0, 1)	" returns 2
       <
     ]=],
+    fast = true,
     name = 'charidx',
     params = {
       { 'string', 'string' },
@@ -1248,25 +1254,22 @@ M.funcs = {
     args = { 1, 2 },
     base = 1,
     desc = [=[
-      Changes the current working directory to {dir}.  The scope of
-      the change is determined as follows:
-      If {scope} is not present, the current working directory is
-      changed to the scope of the current directory:
-          - If the window local directory (|:lcd|) is set, it
-            changes the current working directory for that scope.
-          - Otherwise, if the tabpage local directory (|:tcd|) is
-            set, it changes the current directory for that scope.
-          - Otherwise, changes the global directory for that scope.
+      Sets the |current-directory| of the given {scope}:
+          - "buffer"    Changes the buffer-local directory.  |:bcd|
+          - "window"    Changes the window-local directory.  |:lcd|
+          - "tabpage"   Changes the tabpage-local directory.  |:tcd|
+          - "global"    Changes the global directory.  |:cd|
 
-      If {scope} is present, changes the current working directory
-      for the specified scope:
-          "window"	Changes the window local directory.  |:lcd|
-          "tabpage"	Changes the tabpage local directory.  |:tcd|
-          "global"	Changes the global directory.  |:cd|
+      If {scope} is not given it is decided as follows:
+          - If buffer-local directory (|:bcd|) is set, scope is
+            "buffer".
+          - If the window-local directory (|:lcd|) is set, scope is
+            "window".
+          - If the tabpage-local directory (|:tcd|) is set, scope is
+            "tabpage".
+          - Otherwise, scope is "global".
 
-      {dir} must be a String.
-      If successful, returns the previous working directory.  Pass
-      this to another chdir() to restore the directory.
+      If successful, returns the previous working directory.
       On failure, returns an empty string.
 
       Example: >vim
@@ -1282,9 +1285,6 @@ M.funcs = {
     params = { { 'dir', 'string' }, { 'scope', 'string' } },
     returns = 'string',
     signature = 'chdir({dir} [, {scope}])',
-    see_lua = {
-      '|nvim_set_current_dir()| for the global directory; tab-local, window-local, and return semantics differ',
-    },
   },
   cindent = {
     args = 1,
@@ -1489,12 +1489,23 @@ M.funcs = {
       Returns a |Dictionary| with information about Insert mode
       completion.  See |ins-completion|.
       The items are:
+         auto		|TRUE| when Vim started this completion by
+      		itself, which is what 'autocomplete' does,
+      		and |FALSE| when a key asked for it, such as
+      		|i_CTRL-X_CTRL-O|.  A |complete-functions|
+      		function can read this to tell the two apart.
+      		Returned only when asked for in {what}.
          completed	Return a dictionary containing the entries of
       		the currently selected index item.
          items	List of all completion candidates.  Each item
       		is a dictionary containing the entries "word",
-      		"abbr", "menu", "kind", "info" and
-      		"user_data".
+      		"abbr", "menu", "kind", "info",
+      		"abbr_hlgroup", "kind_hlgroup" and
+      		"user_data". The highlight group entries hold
+      		the name that the item was added with,
+      		or an empty string.
+      		"equal", "preselect" and "commit_chars" are
+      		included only for items that set them.
       		See |complete-items|.
          matches	Same as "items", but only returns items that
       		are matching current query.  If both "matches"
@@ -1682,7 +1693,7 @@ M.funcs = {
       	echo cosh(0.5)
       <	1.127626 >vim
       	echo cosh(-0.5)
-      <	-1.127626
+      <	1.127626
 
     ]=],
     func_float = 'cosh',
@@ -1719,61 +1730,6 @@ M.funcs = {
     },
     returns = 'integer',
     signature = 'count({comp}, {expr} [, {ic} [, {start}]])',
-  },
-  ctxget = {
-    args = { 0, 1 },
-    desc = [=[
-      Returns a |Dictionary| representing the |context| at {index}
-      from the top of the |context-stack| (see |context-dict|).
-      If {index} is not given, it is assumed to be 0 (i.e.: top).
-    ]=],
-    name = 'ctxget',
-    params = { { 'index', 'integer' } },
-    returns = 'table',
-    signature = 'ctxget([{index}])',
-  },
-  ctxpop = {
-    desc = [=[
-      Pops and restores the |context| at the top of the
-      |context-stack|.
-    ]=],
-    name = 'ctxpop',
-    params = {},
-    signature = 'ctxpop()',
-  },
-  ctxpush = {
-    args = { 0, 1 },
-    desc = [=[
-      Pushes the current editor state (|context|) on the
-      |context-stack|.
-      If {types} is given and is a |List| of |String|s, it specifies
-      which |context-types| to include in the pushed context.
-      Otherwise, all context types are included.
-    ]=],
-    name = 'ctxpush',
-    params = { { 'types', 'string[]' } },
-    signature = 'ctxpush([{types}])',
-  },
-  ctxset = {
-    args = { 1, 2 },
-    desc = [=[
-      Sets the |context| at {index} from the top of the
-      |context-stack| to that represented by {context}.
-      {context} is a Dictionary with context data (|context-dict|).
-      If {index} is not given, it is assumed to be 0 (i.e.: top).
-    ]=],
-    name = 'ctxset',
-    params = { { 'context', 'table' }, { 'index', 'integer' } },
-    returns = 'integer',
-    signature = 'ctxset({context} [, {index}])',
-  },
-  ctxsize = {
-    desc = [=[
-      Returns the size of the |context-stack|.
-    ]=],
-    name = 'ctxsize',
-    params = {},
-    signature = 'ctxsize()',
   },
   cursor = {
     args = { 1, 3 },
@@ -1996,10 +1952,11 @@ M.funcs = {
   did_filetype = {
     desc = [=[
       Returns |TRUE| when autocommands are being executed and the
-      FileType event has been triggered at least once.  Can be used
-      to avoid triggering the FileType event again in the scripts
-      that detect the file type. |FileType|
+      FileType event triggered at least once for a buffer with
+      a non-empty 'filetype'.  Can be used to avoid triggering
+      the FileType event again in the |ftdetect| scripts. |FileType|
       Returns |FALSE| when `:setf FALLBACK` was used.
+
       When editing another file, the counter is reset, thus this
       really checks if the FileType event has been triggered for the
       current buffer.  This allows an autocommand that starts
@@ -2022,8 +1979,12 @@ M.funcs = {
       display but don't exist in the buffer.
       {lnum} is used like with |getline()|.  Thus "." is the current
       line, "'m" mark m, etc.
-      Returns 0 if the current window is not in diff mode.
 
+      To get the filler lines after the last buffer line, use: >vim
+      	echo diff_filler(line('$')+1)
+      <
+      Returns 0 if the current window is not in diff mode or filler
+      lines have been disabled using 'diffopt'.
     ]=],
     name = 'diff_filler',
     params = { { 'lnum', 'integer|string' } },
@@ -2556,7 +2517,7 @@ M.funcs = {
     name = 'expand',
     params = {
       { 'string', 'string' },
-      { 'nosuf', 'boolean' },
+      { 'nosuf', 'boolean?' },
       { 'list', 'true|number|string|table' },
     },
     returns = 'string|string[]',
@@ -2570,6 +2531,10 @@ M.funcs = {
       like with |expand()|, and environment variables, anywhere in
       {string}.  "~user" and "~/path" are only expanded at the
       start.
+      The expansion is done in two steps: the special keywords are
+      evaluated first, then "~" and environment variables are
+      expanded in the result.  Thus `expand('%:~')` keeps the "~",
+      while `expandcmd('%:~')` returns the full path.
 
       The following items are supported in the {options} Dict
       argument:
@@ -4135,35 +4100,46 @@ M.funcs = {
     signature = 'getcursorcharpos([{winid}])',
   },
   getcwd = {
-    args = { 0, 2 },
+    args = { 0, 3 },
     base = 1,
     desc = [=[
-      With no arguments, returns the name of the effective
-      |current-directory|. With {winnr} or {tabnr} the working
-      directory of that scope is returned, and 'autochdir' is
-      ignored. Tabs and windows are identified by their respective
-      numbers, 0 means current tab or window. Missing tab number
-      implies 0. Thus the following are equivalent: >vim
-      	getcwd(0)
-      	getcwd(0, 0)
-      <If {winnr} is -1 it is ignored, only the tab is resolved.
-      {winnr} is a |window-number| or |window-ID|.
-      If both {winnr} and {tabnr} are -1 the global working
-      directory is returned.
-      Note: When {tabnr} is -1 Vim returns an empty string to
-      signal that it is invalid, whereas Nvim returns either the
-      global working directory if {winnr} is -1 or the working
-      directory of the window indicated by {winnr}.
-      Throw error if the arguments are invalid. |E5000| |E5001| |E5002|
+      Without arguments, returns the effective |current-directory|.
+      With {winnr} (|window-number| or |window-ID|), {tabnr} or
+      {bufnr} the working directory of that scope is returned,
+      ignoring 'autochdir'.
 
+      - If {winnr} is -1: gets the tabpage directory.
+      - If {winnr} and {tabnr} are both -1: gets the global
+        directory.
+        - Note: Vim returns an empty string when {tabnr} is -1.
+      - If {bufnr} is given: gets the buffer-local directory.
+        ({winnr} and {tabnr} must be -1.)
+      - An argument may be -1 only if preceding args are -1. *E5001*
+
+      Tabs, windows and buffers are identified by their respective
+      numbers, 0 means current tab/window/buffer. Missing {tabnr}
+      implies 0 (missing {bufnr} does not; see below). Thus the
+      following are equivalent: >vim
+          getcwd(0)
+          getcwd(0, 0)
+      <
+      Each form reports its own scope or "wider", so e.g. {winnr}
+      never reports a buffer-local directory.  The {bufnr} form
+      falls back to the global directory, because a buffer belongs
+      to no particular window or tabpage.
+
+      Examples: >vim
+            getcwd(-1, -1, 0)  " Get current buffer's directory
+            getcwd(-1, -1, 3)  " Get directory of buffer 3
+            getcwd(-1, -1, -1) " Get global directory
+            getcwd(-1, -1)     " Get global directory
+      <
     ]=],
     name = 'getcwd',
-    params = { { 'winnr', 'integer' }, { 'tabnr', 'integer' } },
+    params = { { 'winnr', 'integer' }, { 'tabnr', 'integer' }, { 'bufnr', 'integer' } },
     returns = 'string',
-    signature = 'getcwd([{winnr} [, {tabnr}]])',
-    see_lua = {
-      '|uv.cwd()| for the global working directory; tab-local and window-local scopes differ',
-    },
+    signature = 'getcwd([{winnr} [, {tabnr} [, {bufnr}]]])',
+    tags = { 'E5000', 'E5002', 'E5006', 'E5007' },
   },
   getenv = {
     args = 1,
@@ -4342,6 +4318,17 @@ M.funcs = {
       <When {lnum} is a number smaller than 1 or bigger than the
       number of lines in the buffer, an empty string is returned.
 
+    ]=],
+    name = 'getline',
+    params = { { 'lnum', 'integer|string' } },
+    signature = 'getline({lnum})',
+    returns = 'string',
+    see_lua = { '|nvim_get_current_line()|', '|nvim_buf_get_lines()|' },
+  },
+  getline__1 = {
+    args = { 2 },
+    base = 1,
+    desc = [=[
       When {end} is given the result is a |List| where each item is
       a line from the current buffer in the range {lnum} to {end},
       including line {end}.
@@ -4357,18 +4344,10 @@ M.funcs = {
       |getbufoneline()|
     ]=],
     name = 'getline',
-    params = { { 'lnum', 'integer|string' }, { 'end', 'nil|false' } },
-    signature = 'getline({lnum} [, {end}])',
-    returns = 'string',
-    see_lua = { '|nvim_get_current_line()|', '|nvim_buf_get_lines()|' },
-  },
-  getline__1 = {
-    args = { 2 },
-    base = 1,
-    name = 'getline',
-    params = { { 'lnum', 'integer|string' }, { 'end', 'true|number|string|table' } },
-    returns = 'string|string[]',
-    see_lua = { '|nvim_get_current_line()|', '|nvim_buf_get_lines()|' },
+    params = { { 'lnum', 'integer|string' }, { 'end', 'integer|string' } },
+    signature = 'getline({lnum}, {end})',
+    returns = 'string[]',
+    see_lua = { '|nvim_buf_get_lines()|' },
   },
   getloclist = {
     args = { 1, 2 },
@@ -4380,7 +4359,15 @@ M.funcs = {
       For a location list window, the displayed location list is
       returned.  For an invalid {nr}, an empty list is returned.
       Otherwise, same as |getqflist()|.
-
+    ]=],
+    name = 'getloclist',
+    params = { { 'nr', 'integer' } },
+    returns = 'vim.fn.getqflist.ret.item[]',
+    signature = 'getloclist({nr})',
+  },
+  getloclist__1 = {
+    args = { 2 },
+    desc = [=[
       If the optional {what} dictionary argument is supplied, then
       returns the items listed in {what} as a dictionary.  Refer to
       |getqflist()| for the supported items in {what}.
@@ -4405,8 +4392,9 @@ M.funcs = {
       <
     ]=],
     name = 'getloclist',
-    params = { { 'nr', 'integer' }, { 'what', 'table' } },
-    signature = 'getloclist({nr} [, {what}])',
+    params = { { 'nr', 'integer' }, { 'what', 'vim.fn.getloclist.what' } },
+    returns = 'vim.fn.getloclist.ret',
+    signature = 'getloclist({nr}, {what})',
   },
   getmarklist = {
     args = { 0, 1 },
@@ -4418,7 +4406,8 @@ M.funcs = {
       If the optional {buf} argument is specified, returns the
       local marks defined in buffer {buf}.  For the use of {buf},
       see |bufname()|.  If {buf} is invalid, an empty list is
-      returned.
+      returned.  For a |prompt-buffer| the result includes the
+      |':| mark.
 
       Each item in the returned List is a |Dict| with the following:
           mark   name of the mark prefixed by "'"
@@ -4534,7 +4523,7 @@ M.funcs = {
           'x	    Position of mark x (if the mark is not set, 0 is
       	    returned for all values).
           w0	    First line visible in current window (one if the
-      	    display isn't updated, e.g. in silent Ex mode).
+      	    display isn't updated, e.g. in |silent-mode|).
           w$	    Last line visible in current window (this is one
       	    less than "w0" if no lines are visible).
           v	    End of the current Visual selection (unlike |'<|
@@ -4618,8 +4607,8 @@ M.funcs = {
       	type	type of the error, 'E', '1', etc.
       	valid	|TRUE|: recognized error message
       	user_data
-      		custom data associated with the item, can be
-      		any type.
+      		any type.  This entry is present only when
+      		user data was set for this item.
 
       When there is no error list or it's empty, an empty list is
       returned.  Quickfix list entries with a non-existing buffer
@@ -4634,6 +4623,15 @@ M.funcs = {
       	   echo bufname(d.bufnr) ':' d.lnum '=' d.text
       	endfor
       <
+    ]=],
+    name = 'getqflist',
+    params = {},
+    returns = 'vim.fn.getqflist.ret.item[]',
+    signature = 'getqflist()',
+  },
+  getqflist__1 = {
+    args = { 1 },
+    desc = [=[
       If the optional {what} dictionary argument is supplied, then
       returns only the items listed in {what} as a dictionary.  The
       following string items are supported in {what}:
@@ -4661,6 +4659,11 @@ M.funcs = {
       	qfbufnr number of the buffer displayed in the quickfix
       		window.  Returns 0 if the quickfix buffer is
       		not present.  See |quickfix-buffer|.
+      	quickfixtextfunc
+      		function to get the text to display in the
+      		quickfix window.  Returns an empty string if
+      		this function is not set for the list.  See
+      		|quickfix-window-function|.
       	size	number of entries in the quickfix list
       	title	get the list title |quickfix-title|
       	winid	get the quickfix |window-ID|
@@ -4692,6 +4695,9 @@ M.funcs = {
       		0
       	qfbufnr	number of the buffer displayed in the quickfix
       		window.  If not present, set to 0.
+      	quickfixtextfunc
+      		'quickfixtextfunc' setting of the list.  If
+      		not present, set to "".
       	size	number of entries in the quickfix list.  If
       		not present, set to 0.
       	title	quickfix list title text.  If not present, set
@@ -4705,8 +4711,9 @@ M.funcs = {
       <
     ]=],
     name = 'getqflist',
-    params = { { 'what', 'table' } },
-    signature = 'getqflist([{what}])',
+    params = { { 'what', 'vim.fn.getqflist.what' } },
+    returns = 'vim.fn.getqflist.ret',
+    signature = 'getqflist({what})',
   },
   getreg = {
     args = { 0, 3 },
@@ -4855,7 +4862,7 @@ M.funcs = {
       describing the buffer text segments bound by {pos1} and
       {pos2}.
       The segments are a pair of positions for every line: >
-      	[[{start_pos}, {end_pos}], ...]
+      	[[{startpos}, {endpos}], ...]
       <
       The position is a |List| with four numbers:
           [bufnum, lnum, col, off]
@@ -4887,12 +4894,37 @@ M.funcs = {
       			beyond the end of a line, a "col"
       			value of 0 is used for both positions.
       			(default: |FALSE|)
+
+      	bounds		If |TRUE|, return only the outer
+      			bounds of the region as a single
+      			pair: >
+      				[[{startpos}, {endpos}]]
+      <			{startpos} is the start position on
+      			the first line of the region and
+      			{endpos} the end position on its last
+      			line.  The lines in between are not
+      			visited, which is much faster for a
+      			large region.
+      			(default: |FALSE|)
+
+      Using "bounds" with the same {opts} is equivalent to taking
+      the outer positions of the full result: >vim
+      	let full = getregionpos(pos1, pos2, opts)
+      	let bounds = [[full[0][0], full[-1][1]]]
+      <When the full result is empty, e.g. because {pos1} and {pos2}
+      are in different buffers, the result is empty as well.
+      Note that the two positions then come from different lines, so
+      they describe a diagonal of the region and not its shape.  For
+      a blockwise region they are the start of the first line and
+      the end of the last line, not the corners of the block.
+      Likewise, when the first line is empty and "eol" is |FALSE|,
+      {startpos} has a "col" of 0 while {endpos} may not.
     ]=],
     name = 'getregionpos',
     params = {
       { 'pos1', '[integer, integer, integer, integer]' },
       { 'pos2', '[integer, integer, integer, integer]' },
-      { 'opts', '{type?:string, exclusive?:boolean, eol?:boolean}' },
+      { 'opts', '{type?:string, exclusive?:boolean, eol?:boolean, bounds?:boolean}' },
     },
     returns = '[ [integer, integer, integer, integer], [integer, integer, integer, integer] ][]',
     signature = 'getregionpos({pos1}, {pos2} [, {opts}])',
@@ -5455,16 +5487,18 @@ M.funcs = {
     see_lua = { '`dict[key] ~= nil`' },
   },
   haslocaldir = {
-    args = { 0, 2 },
+    args = { 0, 3 },
     base = 1,
     desc = [=[
-      Checks whether the window or tabpage has set a local working
-      directory.  Returns 1 when the window has set a local path
-      via |:lcd| or when {winnr} is -1 and the tabpage has set a
-      local path via |:tcd|, otherwise 0.
+      Checks whether the tabpage, window or buffer has set a local
+      working directory.  Returns 1 when the window has set a local
+      path via |:lcd|, or when {winnr} is -1 and the tabpage has set
+      a local path via |:tcd|, or when {winnr} and {tabnr} are -1
+      and {bufnr} has set a local path via |:bcd|, otherwise 0.
 
-      Tabs and windows are identified by their respective numbers,
-      0 means current tab or window. Missing argument implies 0.
+      Tabs, windows and buffers are identified by their respective
+      numbers, 0 means current tab/window/buffer. Missing {winnr}
+      or {tabnr} implies 0 (missing {bufnr} does not; see below).
       Thus the following are equivalent: >vim
       	echo haslocaldir()
       	echo haslocaldir(0)
@@ -5473,13 +5507,20 @@ M.funcs = {
       With {winnr} and {tabnr} use the window in that tabpage.
       {winnr} is a |window-number| or |window-ID|.
       If {winnr} is -1 it is ignored, only the tab is resolved.
-      Throw error if the arguments are invalid. |E5000| |E5001| |E5002|
+      If {bufnr} is provided, {winnr} and {tabnr} must be -1 and
+      only the buffer is resolved.  An argument may be -1 only if
+      all preceding arguments are -1.
+      Examples of buffer usage: >vim
+        haslocaldir(-1, -1, 0) " Current buf has a local directory?
+        haslocaldir(-1, -1, 3) " Buf #3 has a local directory?
+      <Throw error if the arguments are invalid.
+      |E5000| |E5001| |E5002| |E5006| |E5007|
 
     ]=],
     name = 'haslocaldir',
-    params = { { 'winnr', 'integer' }, { 'tabnr', 'integer' } },
+    params = { { 'winnr', 'integer' }, { 'tabnr', 'integer' }, { 'bufnr', 'integer' } },
     returns = '0|1',
-    signature = 'haslocaldir([{winnr} [, {tabnr}]])',
+    signature = 'haslocaldir([{winnr} [, {tabnr} [, {bufnr} ]]])',
   },
   hasmapto = {
     args = { 1, 3 },
@@ -5540,7 +5581,7 @@ M.funcs = {
       Obsolete name for |hlexists()|.
     ]=],
     func = 'f_hlexists',
-    params = { { 'name', 'string' } },
+    params = { { 'name', 'string|number|boolean|nil' } },
     signature = 'highlight_exists({name})',
     see_lua = { '|nvim_get_hl()|' },
   },
@@ -5687,7 +5728,7 @@ M.funcs = {
 
     ]=],
     name = 'hlexists',
-    params = { { 'name', 'string' } },
+    params = { { 'name', 'string|number|boolean|nil' } },
     returns = '0|1',
     signature = 'hlexists({name})',
     see_lua = { '|nvim_get_hl()|' },
@@ -5739,9 +5780,9 @@ M.funcs = {
       `v:_null_blob` have the same `id()` with different types
       because they are internally represented as NULL pointers.
       `id()` returns a hexadecimal representation of the pointers to
-      the containers (i.e. like `0x994a40`), same as `printf("%p",
-      {expr})`, but it is advised against counting on the exact
-      format of the return value.
+      the containers (i.e. like `0x994a40`), same as
+      `printf("%p", {expr})`, but it is advised against counting on
+      the exact format of the return value.
 
       It is not guaranteed that `id(no_longer_existing_container)`
       will not be equal to some other `id()`: new containers may
@@ -6558,6 +6599,7 @@ M.funcs = {
       <	<C-Home>
 
     ]=],
+    fast = true,
     name = 'keytrans',
     params = { { 'string', 'string' } },
     returns = 'string',
@@ -6879,7 +6921,7 @@ M.funcs = {
       Note that {expr2} is the result of an expression and is then
       used as an expression again.  Often it is good to use a
       |literal-string| to avoid having to double backslashes.  You
-      still have to double ' quotes
+      still have to double single (') quotes, though.
 
       If {expr2} is a |Funcref| it is called with two arguments:
       	1. The key or the index of the current item.
@@ -7944,7 +7986,7 @@ M.funcs = {
     signature = 'mkdir({name} [, {flags} [, {prot}]])',
     tags = { 'E739' },
     see_lua = {
-      '|uv.fs_mkdir()| for simple directory creation; `"p"`, `"D"`, `"R"`, and return semantics differ',
+      '|vim.fs.mkdir()|; `"D"`, `"R"`, and return semantics differ',
     },
   },
   mode = {
@@ -7989,8 +8031,7 @@ M.funcs = {
          Rvx	    Virtual Replace mode |i_CTRL-X| completion
          c	    Command-line editing
          cr	    Command-line editing overstrike mode |c_<Insert>|
-         cv	    Vim Ex mode |gQ|
-         cvr	    Vim Ex mode while in overstrike mode |c_<Insert>|
+         cv	    Non-interactive Ex mode |-es|
          r	    Hit-enter prompt
          rm	    The -- more -- prompt
          r?	    A |:confirm| query of some sort
@@ -8151,6 +8192,7 @@ M.funcs = {
       string, thus results in an empty string.
 
     ]=],
+    fast = true,
     name = 'nr2char',
     params = { { 'expr', 'integer' }, { 'utf8', 'boolean' } },
     returns = 'string',
@@ -8562,7 +8604,7 @@ M.funcs = {
       <      1.41
 
       You will get an overflow error |E1510|, when the field-width
-      or precision will result in a string longer than 1 MB
+      or precision will result in a string longer than 1 MiB
       (1024*1024 = 1048576) chars.
 
       					*E1500*
@@ -8943,7 +8985,7 @@ M.funcs = {
       Each time {expr} is evaluated |v:val| is set to the entry name.
       When {expr} is a function the name is passed as the argument.
       For example, to get a list of files ending in ".txt": >vim
-        echo readdir(dirname, {n -> n =~ '.txt$'})
+        echo readdir(dirname, {n -> n =~ '\.txt$'})
       <To skip hidden and backup files: >vim
         echo readdir(dirname, {n -> n !~ '^\.\|\~$'})
 
@@ -10045,7 +10087,7 @@ M.funcs = {
 
       <Example named pipe: >vim
       	if has('win32')
-      	  echo serverstart('\\.\pipe\nvim-pipe-1234')
+      	  echo serverstart('//./pipe/nvim-pipe-1234')
       	else
       	  echo serverstart('nvim.sock')
       	endif
@@ -10113,8 +10155,11 @@ M.funcs = {
     desc = [=[
       Set option or local variable {varname} (string, without "b:")
       in buffer {buf} to {val}. Also works for a global or
-      window-local option (not variable). When targeting
-      a window-local option, the global option is unchanged.
+      window-local option (not variable). A window-local option is
+      set in a window of the current tabpage that displays {buf},
+      and the global value is unchanged. When no window in the
+      current tabpage displays {buf} the option is not set and no
+      error is given; use |setwinvar()| or |win_execute()| for that.
 
       For the use of {buf}, see |bufname()| above.
 
@@ -10167,6 +10212,8 @@ M.funcs = {
       through the text to check if the cell widths of your terminal
       match with what Vim knows about each emoji.  If it doesn't
       look right you need to adjust the {list} argument.
+
+      |getcellwidths()| can be used to get the overrides later.
     ]=],
     name = 'setcellwidths',
     params = { { 'list', 'any[]' } },
@@ -10545,7 +10592,10 @@ M.funcs = {
       		call setqflist([], 'r')
       <
       'u'	Like 'r', but tries to preserve the current selection
-      	in the quickfix list.
+      	in the quickfix list.  The entry nearest to the
+      	previously selected one becomes the current entry.
+      	Proximity is determined by comparing the file, then
+      	the line number and then the column number.
       'f'	All the quickfix lists in the quickfix stack are
       	freed.
 
@@ -11870,6 +11920,7 @@ M.funcs = {
       	echo str2list("á")		" returns [97, 769]
       <
     ]=],
+    fast = true,
     name = 'str2list',
     params = { { 'string', 'string' }, { 'utf8', 'boolean' } },
     signature = 'str2list({string} [, {utf8}])',
@@ -11917,6 +11968,7 @@ M.funcs = {
       Also see |strlen()|, |strdisplaywidth()| and |strwidth()|.
 
     ]=],
+    fast = true,
     name = 'strcharlen',
     params = { { 'string', 'string' } },
     returns = 'integer',
@@ -11983,6 +12035,7 @@ M.funcs = {
           endif
       <
     ]=],
+    fast = true,
     name = 'strchars',
     params = { { 'string', 'string' }, { 'skipcc', '0|1|boolean' } },
     returns = 'integer',
@@ -12010,6 +12063,7 @@ M.funcs = {
       Also see |strlen()|, |strwidth()| and |strchars()|.
 
     ]=],
+    fast = true,
     name = 'strdisplaywidth',
     params = { { 'string', 'string' }, { 'col', 'integer' } },
     returns = 'integer',
@@ -12057,6 +12111,7 @@ M.funcs = {
       Also see |strcharpart()| and |strchars()|.
 
     ]=],
+    fast = true,
     name = 'strgetchar',
     params = { { 'str', 'string' }, { 'index', 'integer' } },
     returns = 'integer',
@@ -12143,6 +12198,7 @@ M.funcs = {
       Also see |len()|, |strdisplaywidth()| and |strwidth()|.
 
     ]=],
+    fast = true,
     name = 'strlen',
     params = { { 'string', 'string' } },
     returns = 'integer',
@@ -12261,7 +12317,7 @@ M.funcs = {
     base = 1,
     desc = [=[
       Translates all unprintable characters in {string} into
-      printable characters 'isprint', like they are shown in a
+      printable characters, like they are shown in a
       window.  Example: >vim
       	echo strtrans(@a)
       <This displays a newline in register a as "^@" instead of
@@ -13137,6 +13193,7 @@ M.funcs = {
       <returns "{blob}"
 
     ]=],
+    fast = true,
     name = 'tr',
     params = { { 'src', 'string' }, { 'fromstr', 'string' }, { 'tostr', 'string' } },
     returns = 'string',
@@ -13174,6 +13231,7 @@ M.funcs = {
       <returns "  vim"
 
     ]=],
+    fast = true,
     name = 'trim',
     params = { { 'text', 'string' }, { 'mask', 'string' }, { 'dir', '0|1|2' } },
     returns = 'string',
@@ -13369,6 +13427,7 @@ M.funcs = {
       	echo utf16idx('a😊😊', 9)	" returns -1
       <
     ]=],
+    fast = true,
     name = 'utf16idx',
     params = {
       { 'string', 'string' },
@@ -13636,22 +13695,18 @@ M.funcs = {
     args = { 0, 1 },
     base = 1,
     desc = [=[
-      Return the type of the window:
-      	"autocmd"	autocommand window.  Temporary window
-      			used to execute autocommands.
-      	"command"	command-line window |cmdwin|
-      	(empty)		normal window
-      	"loclist"	|location-list-window|
-      	"popup"		floating window |api-floatwin|
-      	"preview"	preview window |preview-window|
-      	"quickfix"	|quickfix-window|
-      	"unknown"	window {nr} not found
+      Gets the type of the given window, or current window if {nr}
+      is omitted:
+      - (empty)     Normal window
+      - "autocmd"   Internal "context-switch" window.
+      - "command"   Command-line window |cmdwin|
+      - "loclist"   |location-list-window|
+      - "popup"     Floating window |api-floatwin|
+      - "preview"   Preview window |preview-window|
+      - "quickfix"  |quickfix-window|
+      - "unknown"   Window {nr} not found
 
-      When {nr} is omitted return the type of the current window.
-      When {nr} is given (|window-number| or |window-ID|) return the
-      type of that window.
-
-      Also see the 'buftype' option.
+      See also the 'buftype' option.
 
     ]=],
     name = 'win_gettype',

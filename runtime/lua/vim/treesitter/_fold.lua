@@ -109,7 +109,7 @@ local function compute_folds_levels(bufnr, info, srow, erow, callback)
       for _, match, metadata in query:iter_matches(tree:root(), bufnr, math.max(srow - 1, 0), erow) do
         for id, nodes in pairs(match) do
           if query.captures[id] == 'fold' then
-            local range = ts.get_range(nodes[1], bufnr, metadata[id])
+            local range = ts.get_range(assert(nodes[1]), bufnr, metadata[id])
             local start, _, stop, stop_col = Range.unpack4(range)
 
             if #nodes > 1 then
@@ -202,7 +202,7 @@ local M = {}
 ---@type table<integer,TS.FoldInfo>
 local foldinfos = {}
 
-local group = api.nvim_create_augroup('nvim.treesitter.fold', {})
+local group = api.nvim_create_augroup('nvim.treesitter.fold')
 
 --- Update the folds in the windows that contain the buffer and use expr foldmethod (assuming that
 --- the user doesn't use different foldexpr for the same buffer).
@@ -212,6 +212,7 @@ local group = api.nvim_create_augroup('nvim.treesitter.fold', {})
 ---@package
 ---@param srow integer
 ---@param erow integer 0-indexed, exclusive
+---@param bufnr integer
 function FoldInfo:foldupdate(bufnr, srow, erow)
   if self.foldupdate_range then
     edit_range(self.foldupdate_range, srow, erow, erow)
@@ -237,6 +238,7 @@ function FoldInfo:foldupdate(bufnr, srow, erow)
 end
 
 ---@package
+---@param bufnr integer
 function FoldInfo:do_foldupdate(bufnr)
   -- InsertLeave is not executed when <C-C> is used for exiting the insert mode, leaving
   -- do_foldupdate untouched. If another execution of foldupdate consumes foldupdate_range, the
@@ -291,9 +293,10 @@ local function on_changedtree(bufnr, tree_changes)
       local srow, _, erow, ecol = Range.unpack4(change)
       -- If a parser doesn't have any ranges explicitly set, treesitter will
       -- return a range with end_row and end_bytes with a value of UINT32_MAX,
-      -- so clip end_row to the max buffer line.
+      -- which is represented as -1 on 32-bit platforms, so clip end_row to
+      -- the max buffer line.
       -- TODO(lewis6991): Handle this generally
-      if erow > max_erow then
+      if erow > max_erow or erow < 0 then
         erow = max_erow
       elseif ecol > 0 then
         erow = erow + 1
@@ -318,6 +321,7 @@ end
 ---@param old_col integer
 ---@param new_row integer
 ---@param new_col integer
+---@param start_col integer
 local function on_bytes(bufnr, start_row, start_col, old_row, old_col, new_row, new_col)
   -- Buffer reload clears `foldinfos[bufnr]`, which may still be nil when callback is invoked.
   local foldinfo = foldinfos[bufnr]

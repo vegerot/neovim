@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local eq = t.eq
 local ok = t.ok
 local exec_lua = n.exec_lua
@@ -128,6 +129,28 @@ describe('vim.ui', function()
       )
     end)
 
+    it('escapes cmd.exe metacharacters in URIs #41337', function()
+      eq(
+        { 'cmd.exe', '/c', 'start', '', 'https://example.com/?q=^&^|^<^>^^^%^!' },
+        exec_lua(function()
+          vim.fn.has = function(feat)
+            return feat == 'win32' and 1 or 0
+          end
+          local captured --- @type string[]
+          vim.system = function(cmd)
+            captured = cmd
+            return {
+              wait = function()
+                return { code = 0 }
+              end,
+            }
+          end
+          vim.ui.open('https://example.com/?q=&|<>^%!')
+          return captured
+        end)
+      )
+    end)
+
     it('opt.cmd #29490', function()
       t.matches(
         'ENOENT: no such file or directory',
@@ -148,6 +171,17 @@ describe('vim.ui', function()
           assert(cmd and not err)
           return cmd:wait()
         end, { n.testprg('printargs-test'), 'arg1' })
+      )
+    end)
+
+    it('can reuse opt.cmd without accumulating paths', function()
+      eq(
+        'arg1=arg1;arg2=https://example.com/second;',
+        exec_lua(function(opener)
+          local opts = { cmd = { opener, 'arg1' } }
+          vim.ui.open('https://example.com/first', opts):wait()
+          return vim.ui.open('https://example.com/second', opts):wait().stdout
+        end, n.testprg('printargs-test'))
       )
     end)
 
@@ -180,7 +214,7 @@ describe('vim.ui', function()
       })
       n.api.nvim_set_option_value('filetype', 'help', { buf = buf, scope = 'local' })
       local tags = n.api.nvim_buf_get_extmarks(buf, link_ns, 0, -1, {})
-      eq(#tags, 0)
+      eq(0, #tags)
     end)
   end)
 end)

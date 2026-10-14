@@ -45,7 +45,7 @@
 /// @return Number of cells.
 ///
 /// @see charsize_nowrap()
-int win_chartabsize(win_T *wp, char *p, colnr_T col)
+int win_chartabsize(win_T *wp, const char *p, colnr_T col)
 {
   buf_T *buf = wp->w_buffer;
   if (*p == TAB && (!wp->w_p_list || wp->w_p_lcs_chars.tab1)) {
@@ -100,6 +100,7 @@ CSType init_charsize_arg(CharsizeArg *csarg, win_T *wp, linenr_T lnum, char *lin
   csarg->cur_text_width_left = 0;
   csarg->cur_text_width_right = 0;
   csarg->virt_row = -1;
+  csarg->skip_cur_text = false;
   csarg->indent_width = INT_MIN;
   csarg->use_tabstop = !wp->w_p_list || wp->w_p_lcs_chars.tab1;
 
@@ -118,6 +119,44 @@ CSType init_charsize_arg(CharsizeArg *csarg, win_T *wp, linenr_T lnum, char *lin
   }
 }
 
+/// Like init_charsize_arg(), but do not count inline virtual text at the measured character.
+/// The 'linebreak' lookahead can still use "virt_row", without initializing "iter".
+CSType init_charsize_arg_skip_cur_text(CharsizeArg *csarg, win_T *wp, linenr_T lnum, char *line)
+{
+  CSType cstype = init_charsize_arg(csarg, wp, 0, line);
+  csarg->skip_cur_text = true;
+  if (lnum > 0 && buf_meta_total(wp->w_buffer, kMTMetaInline) > 0) {
+    csarg->virt_row = lnum - 1;
+    cstype = kCharsizeRegular;
+  }
+  return cstype;
+}
+
+/// Total width of inline virtual text at buffer column "col" of row "row", advancing "iter".
+/// Call with non-decreasing "col", like the walks in charsize_regular().
+static int inline_virt_text_width(win_T *wp, MarkTreeIter *iter, int row, int col)
+{
+  buf_T *const buf = wp->w_buffer;
+  int width = 0;
+  while (true) {
+    MTKey mark = marktree_itr_current(iter);
+    if (mark.pos.row != row || mark.pos.col > col) {
+      break;
+    } else if (mark.pos.col == col && !mt_invalid(mark) && ns_in_win(mark.ns, wp)) {
+      DecorInline decor = mt_decor(mark);
+      DecorVirtText *vt = decor.ext ? decor.data.ext.vt : NULL;
+      while (vt) {
+        if (!(vt->flags & kVTIsLines) && vt->pos == kVPosInline) {
+          width += vt->width;
+        }
+        vt = vt->next;
+      }
+    }
+    marktree_itr_next_filter(buf->b_marktree, iter, row + 1, 0, inline_filter);
+  }
+  return width;
+}
+
 /// Get the number of cells taken up on the screen for the given arguments.
 /// "csarg->cur_text_width_left" and "csarg->cur_text_width_right" are set
 /// to the extra size for inline virtual text.
@@ -126,8 +165,8 @@ CSType init_charsize_arg(CharsizeArg *csarg, win_T *wp, linenr_T lnum, char *lin
 /// of 'showbreak'/'breakindent' before "csarg->max_head_vcol".
 /// When "csarg->max_head_vcol" is negative, only count in "head" the size
 /// of 'showbreak'/'breakindent' before where cursor should be placed.
-CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vcol,
-                          int32_t const cur_char)
+CharSize charsize_regular(CharsizeArg *csarg, const char *cur, colnr_T const vcol,
+                          int32_t const cur_char, int mb_width)
 {
   csarg->cur_text_width_left = 0;
   csarg->cur_text_width_right = 0;
@@ -152,11 +191,11 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
   } else if (cur_char < 0) {
     size = kInvalidByteCells;
   } else {
-    size = ptr2cells(cur);
+    size = mb_width;
     is_doublewidth = size == 2 && cur_char >= 0x80;
   }
 
-  if (csarg->virt_row >= 0) {
+  if (csarg->virt_row >= 0 && !csarg->skip_cur_text) {
     int tab_size = size;
     int col = (int)(cur - line);
     while (true) {
@@ -302,7 +341,7 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
     need_lbr = cur >= t;
   }
   if (need_lbr) {
-    char *s = cur;
+    const char *s = cur;
     // Count all characters from first non-blank after a blank up to next
     // non-blank after a blank.
     int numberextra = win_col_off(wp);
@@ -312,13 +351,18 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
       colmax += col_adj;
       int n = colmax + win_col_off2(wp);
       if (n > 0) {
-        colmax += (((vcol - colmax) / n) + 1) * n - col_adj;
+        colmax += (((vcol + col_adj - colmax) / n) + 1) * n - col_adj;
       }
     }
 
+    // Inline virtual text widens the word, so count it like the loop above does for one
+    // character. Needs its own iterator, since this looks ahead of "csarg->iter".
+    MarkTreeIter virt_iter[1];
+    int has_virt = csarg->virt_row < 0 ? 0 : -1;  // -1: not sought yet
+
     colnr_T vcol2 = vcol;
     while (true) {
-      char *ps = s;
+      const char *ps = s;
       MB_PTR_ADV(s);
       int c = (uint8_t)(*s);
       if (!(c != NUL
@@ -326,6 +370,14 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
         break;
       }
 
+      int const col = (int)(s - line);
+      if (has_virt < 0) {
+        has_virt = marktree_itr_get_filter(buf->b_marktree, csarg->virt_row, col,
+                                           csarg->virt_row + 1, 0, inline_filter, virt_iter);
+      }
+      int const virt_width = has_virt
+                             ? inline_virt_text_width(wp, virt_iter, csarg->virt_row, col) : 0;
+      vcol2 += virt_width;
       vcol2 += win_chartabsize(wp, s, vcol2);
       if (vcol2 >= colmax) {  // doesn't fit
         size = colmax - vcol + col_adj;
@@ -347,7 +399,7 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
 /// @see charsize_regular
 /// @see charsize_fast
 static inline CharSize charsize_fast_impl(win_T *const wp, const char *cur, bool use_tabstop,
-                                          colnr_T const vcol, int32_t const cur_char)
+                                          colnr_T const vcol, int32_t const cur_char, int mb_width)
   FUNC_ATTR_PURE FUNC_ATTR_ALWAYS_INLINE
 {
   // A tab gets expanded, depending on the current column
@@ -365,7 +417,7 @@ static inline CharSize charsize_fast_impl(win_T *const wp, const char *cur, bool
       // we likely want a specialized version of utf_ptr2StrCharInfo also determining
       // the ptr2cells width at the same time without any extra decoding. (also applies
       // to charsize_regular and charsize_nowrap)
-      width = ptr2cells(cur);
+      width = mb_width;
     }
 
     // If a double-width char doesn't fit at the end of a line, it wraps to the next line,
@@ -384,23 +436,25 @@ static inline CharSize charsize_fast_impl(win_T *const wp, const char *cur, bool
 /// Can be used if CSType is kCharsizeFast.
 ///
 /// @see charsize_regular
-CharSize charsize_fast(CharsizeArg *csarg, const char *cur, colnr_T vcol, int32_t cur_char)
+CharSize charsize_fast(CharsizeArg *csarg, const char *cur, colnr_T vcol, int32_t cur_char,
+                       int mb_width)
   FUNC_ATTR_PURE
 {
-  return charsize_fast_impl(csarg->win, cur, csarg->use_tabstop, vcol, cur_char);
+  return charsize_fast_impl(csarg->win, cur, csarg->use_tabstop, vcol, cur_char, mb_width);
 }
 
 /// Get the number of cells taken up on the screen at given virtual column.
 ///
 /// @see win_chartabsize()
-int charsize_nowrap(buf_T *buf, const char *cur, bool use_tabstop, colnr_T vcol, int32_t cur_char)
+int charsize_nowrap(buf_T *buf, const char *cur, bool use_tabstop, colnr_T vcol, int32_t cur_char,
+                    int mb_width)
 {
   if (cur_char == TAB && use_tabstop) {
     return tabstop_padding(vcol, buf->b_p_ts, buf->b_p_vts_array);
   } else if (cur_char < 0) {
     return kInvalidByteCells;
   } else {
-    return ptr2cells(cur);
+    return mb_width;
   }
 }
 
@@ -447,8 +501,9 @@ int linesize_regular(CharsizeArg *const csarg, int vcol_arg, colnr_T const len)
 
   StrCharInfo ci = utf_ptr2StrCharInfo(line);
   while (ci.ptr - line < len && *ci.ptr != NUL) {
-    vcol += charsize_regular(csarg, ci.ptr, vcol_arg, ci.chr.value).width;
-    ci = utfc_next(ci);
+    ClusterInfo cli = utf_ClusterInfo(ci);
+    vcol += charsize_regular(csarg, ci.ptr, vcol_arg, ci.chr.value, cli.cells).width;
+    ci = cli.next;
     if (vcol > MAXCOL) {
       vcol_arg = MAXCOL;
       break;
@@ -459,7 +514,7 @@ int linesize_regular(CharsizeArg *const csarg, int vcol_arg, colnr_T const len)
 
   // Check for inline virtual text after the end of the line.
   if (len == MAXCOL && csarg->virt_row >= 0 && *ci.ptr == NUL) {
-    int head = charsize_regular(csarg, ci.ptr, vcol_arg, ci.chr.value).head;
+    int head = charsize_regular(csarg, ci.ptr, vcol_arg, ci.chr.value, 0).head;
     vcol += csarg->cur_text_width_left + csarg->cur_text_width_right + head;
     vcol_arg = vcol > MAXCOL ? MAXCOL : (int)vcol;
   }
@@ -480,8 +535,9 @@ int linesize_fast(CharsizeArg const *const csarg, int vcol_arg, colnr_T const le
 
   StrCharInfo ci = utf_ptr2StrCharInfo(line);
   while (ci.ptr - line < len && *ci.ptr != NUL) {
-    vcol += charsize_fast_impl(wp, ci.ptr, use_tabstop, vcol_arg, ci.chr.value).width;
-    ci = utfc_next(ci);
+    ClusterInfo cli = utf_ClusterInfo(ci);
+    vcol += charsize_fast_impl(wp, ci.ptr, use_tabstop, vcol_arg, ci.chr.value, cli.cells).width;
+    ci = cli.next;
     if (vcol > MAXCOL) {
       vcol_arg = MAXCOL;
       break;
@@ -548,8 +604,9 @@ void getvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *en
         char_size = (CharSize){ .width = 1 };
         break;
       }
-      char_size = charsize_fast_impl(wp, ci.ptr, use_tabstop, vcol, ci.chr.value);
-      StrCharInfo const next = utfc_next(ci);
+      ClusterInfo cli = utf_ClusterInfo(ci);
+      char_size = charsize_fast_impl(wp, ci.ptr, use_tabstop, vcol, ci.chr.value, cli.cells);
+      StrCharInfo const next = cli.next;
       if (next.ptr - line > end_col) {
         break;
       }
@@ -558,7 +615,8 @@ void getvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *en
     }
   } else {
     while (true) {
-      char_size = charsize_regular(&csarg, ci.ptr, vcol, ci.chr.value);
+      ClusterInfo cli = utf_ClusterInfo(ci);
+      char_size = charsize_regular(&csarg, ci.ptr, vcol, ci.chr.value, cli.cells);
       // make sure we don't go past the end of the line
       if (*ci.ptr == NUL) {
         // NUL at end of line only takes one column unless there is virtual text
@@ -566,7 +624,7 @@ void getvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *en
         on_NUL = true;
         break;
       }
-      StrCharInfo const next = utfc_next(ci);
+      StrCharInfo const next = cli.next;
       if (next.ptr - line > end_col) {
         break;
       }
@@ -594,7 +652,7 @@ void getvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *en
         && (State & MODE_NORMAL)
         && !wp->w_p_list
         && !virtual_active(wp)
-        && !(VIsual_active && ((*p_sel == 'e') || ltoreq(*pos, VIsual)))) {
+        && !(Visual.active && ((*p_sel == 'e') || ltoreq(*pos, Visual.start)))) {
       // TODO(zeertzjq): subtracting "tail" may lead to better cursor position
       *cursor = vcol + incr - 1;  // cursor at end
     } else {
@@ -814,7 +872,7 @@ int plines_win_nofold(win_T *wp, linenr_T lnum)
 }
 
 /// Like plines_win(), but only reports the number of physical screen lines
-/// used from the start of the line to the given column number.
+/// used from the start of the line to the given byte column.
 int plines_win_col(win_T *wp, linenr_T lnum, long column)
 {
   // Check for filler lines above this buffer line.
@@ -837,14 +895,16 @@ int plines_win_col(win_T *wp, linenr_T lnum, long column)
   StrCharInfo ci = utf_ptr2StrCharInfo(line);
   if (cstype == kCharsizeFast) {
     bool const use_tabstop = csarg.use_tabstop;
-    while (*ci.ptr != NUL && --column >= 0) {
-      vcol += charsize_fast_impl(wp, ci.ptr, use_tabstop, vcol, ci.chr.value).width;
-      ci = utfc_next(ci);
+    while (*ci.ptr != NUL && ci.ptr < line + column) {
+      ClusterInfo cli = utf_ClusterInfo(ci);
+      vcol += charsize_fast_impl(wp, ci.ptr, use_tabstop, vcol, ci.chr.value, cli.cells).width;
+      ci = cli.next;
     }
   } else {
-    while (*ci.ptr != NUL && --column >= 0) {
-      vcol += charsize_regular(&csarg, ci.ptr, vcol, ci.chr.value).width;
-      ci = utfc_next(ci);
+    while (*ci.ptr != NUL && ci.ptr < line + column) {
+      ClusterInfo cli = utf_ClusterInfo(ci);
+      vcol += charsize_regular(&csarg, ci.ptr, vcol, ci.chr.value, cli.cells).width;
+      ci = cli.next;
     }
   }
 
@@ -855,7 +915,7 @@ int plines_win_col(win_T *wp, linenr_T lnum, long column)
   // of 'ts') -- webb.
   colnr_T col = vcol;
   if (ci.chr.value == TAB && (State & MODE_NORMAL) && csarg.use_tabstop) {
-    col += win_charsize(cstype, col, ci.ptr, ci.chr.value, &csarg).width - 1;
+    col += win_charsize(cstype, col, ci.ptr, ci.chr.value, &csarg, 1).width - 1;
   }
 
   // Add column offset for 'number', 'relativenumber', 'foldcolumn', etc.
@@ -1028,4 +1088,18 @@ int64_t win_text_height(win_T *const wp, const linenr_T start_lnum, const int64_
     *fill = height_sum_fill;
   }
   return height_sum_fill + height_sum_nofill;
+}
+
+/// Return the maximum display width of lines "first" through "last".
+///
+/// @param max  stop measuring once this width is reached
+///
+/// @return  maximum display width, capped at "max"
+int win_max_displaywidth(win_T *wp, linenr_T first, linenr_T last, int max)
+{
+  int width = 0;
+  for (linenr_T lnum = first; lnum <= last && width < max; lnum++) {
+    width = MAX(width, linetabsize(wp, lnum));
+  }
+  return MIN(max, width);
 }

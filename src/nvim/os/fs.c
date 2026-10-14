@@ -804,6 +804,16 @@ int os_setperm(const char *const name, int perm)
   return (r == kLibuvSuccess ? OK : FAIL);
 }
 
+/// Set the permission of the file referred to by the open file descriptor.
+///
+/// @return `OK` for success, `FAIL` for failure.
+int os_fsetperm(int fd, int perm)
+{
+  int r;
+  RUN_UV_FS_FUNC(r, uv_fs_fchmod, fd, perm, NULL);
+  return (r == kLibuvSuccess ? OK : FAIL);
+}
+
 #ifdef HAVE_XATTR
 /// Copy extended attributes from_file to to_file
 void os_copy_xattr(const char *from_file, const char *to_file)
@@ -1227,7 +1237,7 @@ bool os_fileinfo2(const char *path, FileInfo *info)
     info->rest_off = (size_t)(p - path);
     return true;
   }
-  if (p[0] == '?' || p[0] == '.') {
+  if (leading_slashes >= 2 && (p[0] == '?' || p[0] == '.')) {
     if (!vim_ispathsep_nocolon(p[1])) {
       return true;
     }

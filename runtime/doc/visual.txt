@@ -88,21 +88,28 @@ blockwise Visual    Visual	   Normal		  linewise Visual
 linewise Visual     Visual	   blockwise Visual	  Normal
 
 						*gv* *v_gv* *reselect-Visual*
-gv			Start Visual mode with the same area as the previous
-			area and the same mode.
-			In Visual mode the current and the previous Visual
-			area are exchanged.
-			After using "p" or "P" in Visual mode the text that
-			was put will be selected.
+gv			Starts Visual mode with the previous Visual area and
+			mode.  In Visual mode the current and the previous
+			Visual area are exchanged. After using "p" or "P" in
+			Visual mode the text that was put will be selected.
+
+			An operator target that internally creates a temporary
+			Visual selection (|gn|, "d<C-v>j", an |omap-info| text
+			object) does not update the previous ("gv") area (nor
+			|'<| |'>|, |visualmode()|).
 
 								*gn* *v_gn*
-gn			Search forward for the last used search pattern, like
-			with `n`, and start Visual mode to select the match.
-			If the cursor is on the match, visually selects it.
-			If an operator is pending, operates on the match.
-			E.g., "dgn" deletes the text of the next match.
-			If Visual mode is active, extends the selection
-			until the end of the next match.
+gn			Searches forward for the last-used search pattern,
+			like with `n`, and starts Visual mode to select the
+			match. If the cursor is on the match, visually selects
+			it. If an operator is pending, operates on the match.
+			E.g., "dgn" deletes the text of the next match. If
+			Visual mode is active, extends the selection until the
+			end of the next match.
+
+			The Visual marks |'<| |'>| are not changed, so "cgn"
+			with a |/\%V| pattern can be repeated with |.|.
+
 			'wrapscan' applies.
 			Note: Unlike `n` the search direction does not depend
 			on the previous search command.
@@ -359,21 +366,43 @@ See |v_b_r_example|.
 ==============================================================================
 6. Repeating						*visual-repeat*
 
-When repeating a Visual mode operator, the operator will be applied to the
-same amount of text as the last time:
-- Linewise Visual mode: The same number of lines.
-- Blockwise Visual mode: The same number of lines and columns.
-- Normal Visual mode within one line: The same number of characters.
-- Normal Visual mode with several lines: The same number of lines, in the
-  last line the same number of characters as in the last line the last time.
-The start of the text is the Cursor position.  If the "$" command was used as
-one of the last commands to extend the highlighted text, the repeating will
-be applied up to the rightmost column of the longest line.  Any count passed
-to the `.` command is not used.
+Repeating a Visual operation works "semantically": |.| replays the captured
+keysequence (Visual selection plus operator) at the cursor: "viwd" then "."
+deletes the word at the cursor, whatever its size. (Note: this is unlike Vim,
+where Visual-repeat works on the same fixed-size region. If you prefer that
+behavior, see |visual-fixed-size|.)
 
-Visual mode |default-mappings| "@" and "Q" repeat a register for all selected
-lines if the selection is linewise.  See |v_@-default| and |v_Q-default| for
-details.  For example, given the text:
+A [count] given to "." is prepended to the replayed keys. If the selection was
+extended by a command that cannot be replayed (mouse, search, Ex command,
+scroll), or used |gv| (e.g. a mapping like ">gv"), "." instead applies the
+operator to a same-size area, as if "1v" (|v|) preceded it.
+
+							*visual-fixed-size*
+Example: To mimic Vim's fixed-size Visual dot-repeat: after a Visual
+operation, reselect the fixed-size region ("1v", |v|) and applies the
+operator: >lua
+
+    local vop ---@type string?
+    vim.api.nvim_create_autocmd('CmdAtom', {
+      ---@param ev {data: vim.event.cmdatom.data}
+      callback = function(ev)
+        if ev.data.type == 'visual' then
+          vop = ev.data.atoms and ev.data.atoms[#ev.data.atoms].keys or nil
+        elseif ev.data.changed then
+          vop = nil  -- the last change is no longer the Visual one
+        end
+      end,
+    })
+    vim.keymap.set('n', '.', function()
+      vim.schedule(function()
+        vim.api.nvim_feedkeys(vop and ('1v' .. vop) or '.', 'n', false)
+      end)
+    end)
+<
+
+The Visual mode |default-mappings| "@" repeats a register for all selected
+lines if the selection is linewise.  See |v_@-default| for details.  For
+example, given the text:
 
 	123(hello)321
 	456(world)654

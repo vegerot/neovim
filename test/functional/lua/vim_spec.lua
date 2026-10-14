@@ -3,6 +3,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local nvim_prog = n.nvim_prog
 local fn = n.fn
 local api = n.api
@@ -457,6 +458,21 @@ describe('lua stdlib', function()
       'index out of range',
       pcall_err(exec_lua, 'return vim.str_utfindex(_G.test_text, ...)', len + 1)
     )
+  end)
+
+  it('vim.str_byteindex stays within the string for truncated sequences', function()
+    for _, s in ipairs({ '\xc3', '\xe4\xb8', '\xf0\x9f', '\xf0\x9f\x98', 'abc\xc3' }) do
+      for _, encoding in ipairs({ 'utf-8', 'utf-16', 'utf-32' }) do
+        for index = 0, #s + 2 do
+          local byteindex = exec_lua('return vim.str_byteindex(...)', s, encoding, index, false)
+          ok(
+            byteindex <= #s,
+            ('at most %d'):format(#s),
+            ('%d (encoding=%s, index=%d)'):format(byteindex, encoding, index)
+          )
+        end
+      end
+    end
   end)
 
   it('vim.str_utf_start', function()
@@ -1391,7 +1407,7 @@ describe('lua stdlib', function()
   it('vim.fn `func_lua` (fast path for Lua-implemented builtins)', function()
     -- hostname() is implemented via func_lua, calling Lua directly when invoked from Lua.
     local lua_result = exec_lua([[return vim.fn.hostname()]])
-    eq(type(lua_result), 'string')
+    eq('string', type(lua_result))
     assert(#lua_result > 0, 'hostname() should return a non-empty string')
     -- VimScript path (lua_wrapper) should return the same result.
     eq(lua_result, eval('hostname()'))
@@ -1791,6 +1807,22 @@ describe('lua stdlib', function()
     ]]
 
     eq(2, fn.luaeval 'vim.g.var')
+
+    -- Passing many arguments to indexed vim.cmd (#41314)
+    local props = exec_lua [[
+      local props = {}
+      for i = 1, 300 do
+        props[i] = ('custom_property_%03d'):format(i)
+      end
+      vim.cmd.syntax { 'keyword', 'editorconfigProperty', unpack(props) }
+      return props
+    ]]
+
+    local output = n.exec_capture('syntax list editorconfigProperty')
+    output = output:match('^%-%-%- Syntax items %-%-%-\neditorconfigProperty xxx (.*)')
+    local output_list = vim.split(output, ' ')
+    table.sort(output_list)
+    eq(props, output_list)
   end)
 
   it('vim.regex', function()
@@ -1813,6 +1845,29 @@ describe('lua stdlib', function()
     -- vim.regex() error inside :silent! should not crash. #20546
     command([[silent! lua vim.regex('\\z')]])
     assert_alive()
+
+    -- match_str() in a fast (luv) callback does not abort. #18111
+    eq(
+      { true, true },
+      exec_lua(function()
+        local re = vim.regex('^.*\\.go$')
+        local res
+        local timer = assert(vim.uv.new_timer())
+        timer:start(10, 0, function()
+          -- Enough matches to reach BREAKCHECK_SKIP, which would abort (reentrant event loop).
+          local ok = true
+          for _ = 1, 3000 do
+            ok = ok and re:match_str('internal/config/config.go') ~= nil
+          end
+          res = { ok, vim.in_fast_event() }
+          timer:close()
+        end)
+        vim.wait(1000, function()
+          return res ~= nil
+        end)
+        return res
+      end)
+    )
   end)
 
   it('vim.defer_fn', function()
@@ -2062,7 +2117,7 @@ describe('lua stdlib', function()
       eq('/', exec_lua([[return _G.ctrl_c_cmdtype]]))
     end)
 
-    it('callback is not invoked recursively #30752', function()
+    it('not invoked recursively #30752', function()
       local screen = Screen.new(60, 10)
       exec_lua([[
         vim.on_key(function(key, typed)
@@ -2098,6 +2153,21 @@ describe('lua stdlib', function()
         {1:~                                                           }|*8
                                                                     |
       ]])
+    end)
+
+    it('not invoked for keys consumed by getchar() #40010', function()
+      exec_lua(function()
+        _G.typed = {}
+        vim.on_key(function(_, typed)
+          table.insert(_G.typed, vim.fn.keytrans(typed))
+        end)
+        vim.keymap.set('n', '<M-m>', function()
+          _G.got = vim.fn.getchar()
+        end)
+      end)
+      feed('<M-m><CR>')
+      eq(13, exec_lua('return _G.got'))
+      eq({ '<M-m>' }, exec_lua('return _G.typed'))
     end)
 
     it('can discard input', function()
@@ -3046,6 +3116,23 @@ describe('vim.keymap', function()
     eq(1, exec_lua [[return GlobalCount]])
     eq('\nNo mapping found', n.exec_capture('nmap ghjk'))
     eq('\nNo mapping found', n.exec_capture('nmap qwer'))
+  end)
+
+  it('unmap with lhs option', function()
+    eq(
+      'q',
+      exec_lua [[
+      vim.keymap.set('n', 'ge', 'q')
+      local ok, err = pcall(vim.keymap.del, 'n', 'q', { lhs = true })
+      assert(not ok and err:match('E31: No such mapping'), err)
+      return vim.fn.maparg('ge', 'n')
+    ]]
+    )
+
+    exec_lua [[
+      vim.keymap.del('n', 'ge', { lhs = true })
+    ]]
+    eq('\nNo mapping found', n.exec_capture('nmap ge'))
   end)
 
   it('buffer-local mappings', function()

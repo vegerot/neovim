@@ -767,8 +767,9 @@ func Test_search_regexp()
   call assert_equal([0, 2, 5, 0], getpos('.'))
   call assert_equal(2, line('$'))
   normal u
-  call assert_equal('9 foobar', getline('.'))
-  call assert_equal([0, 2, 6, 0], getpos('.'))
+  " Nvim: undo restores the cursor to where "dv?bar?" started.
+  call assert_equal('9 foobar', getline(2))
+  call assert_equal([0, 3, 1, 0], getpos('.'))
   call assert_equal(3, line('$'))
 
   set undolevels&
@@ -2361,6 +2362,19 @@ func Test_incsearch_delimiter_ctrlg()
   call term_sendkeys(buf, "\<Esc>")
 
   call StopVimInTerminal(buf)
+endfunc
+
+func Test_searchcount_maxcount_cached()
+  new
+  call setline(1, repeat(['foo'], 5))
+  set maxsearchcount=99
+  let @/ = 'foo'
+  call cursor(1, 1)
+  call searchcount(#{recompute: v:true,  maxcount: 3})
+  let r = searchcount(#{recompute: v:false, maxcount: 3})
+  call assert_equal(3, r.maxcount)
+  set maxsearchcount&
+  bwipe!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

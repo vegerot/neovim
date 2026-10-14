@@ -2,6 +2,8 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, after_each, pending, finally =
+  t.describe, t.it, t.before_each, t.after_each, t.pending, t.finally
 local clear, feed = n.clear, n.feed
 local eval = n.eval
 local eq = t.eq
@@ -405,7 +407,7 @@ describe('ui/ext_messages', function()
           content = { { '' } },
           pos = 0,
           -- Default vim.ui.select uses this prompt.
-          prompt = 'Type number and <Enter> or click with the mouse (q or empty cancels): ',
+          prompt = 'Type number and <Enter> (q or empty cancels): ',
         },
       },
       -- Message depends on runtimepath, only test the static text...
@@ -934,14 +936,14 @@ describe('ui/ext_messages', function()
   end)
 
   it("supports 'showcmd' and 'ruler(format)'", function()
-    command('set showcmd ruler')
+    command('set showcmd ruler rulerformat=%12(%l,%c%V%=%P%)')
     command('hi link MsgArea ErrorMsg')
     screen:expect({
       grid = [[
         ^                         |
         {1:~                        }|*4
       ]],
-      ruler = { { '0,0-1   All', 9, 'MsgArea' } },
+      ruler = { { '0,0-1    All', 9, 'MsgArea' } },
     })
     command('hi clear MsgArea')
     feed('i')
@@ -951,7 +953,7 @@ describe('ui/ext_messages', function()
         {1:~                        }|*4
       ]],
       showmode = { { '-- INSERT --', 5, 'ModeMsg' } },
-      ruler = { { '0,1     All', 'MsgArea' } },
+      ruler = { { '0,1      All', 'MsgArea' } },
     }
     feed('abcde<cr>12345<esc>')
     screen:expect {
@@ -960,7 +962,7 @@ describe('ui/ext_messages', function()
         1234^5                    |
         {1:~                        }|*3
       ]],
-      ruler = { { '2,5     All', 'MsgArea' } },
+      ruler = { { '2,5      All', 'MsgArea' } },
     }
     feed('d')
     screen:expect {
@@ -970,7 +972,7 @@ describe('ui/ext_messages', function()
         {1:~                        }|*3
       ]],
       showcmd = { { 'd' } },
-      ruler = { { '2,5     All', 'MsgArea' } },
+      ruler = { { '2,5      All', 'MsgArea' } },
     }
     feed('<esc>^')
     screen:expect {
@@ -979,18 +981,18 @@ describe('ui/ext_messages', function()
         ^12345                    |
         {1:~                        }|*3
       ]],
-      ruler = { { '2,1     All', 'MsgArea' } },
+      ruler = { { '2,1      All', 'MsgArea' } },
     }
     feed('<c-v>k2l')
     screen:expect({
       grid = [[
-        {17:ab}^cde                    |
+        {17:ab^c}de                    |
         {17:123}45                    |
         {1:~                        }|*3
       ]],
       showmode = { { '-- VISUAL BLOCK --', 5, 'ModeMsg' } },
       showcmd = { { '2x3' } },
-      ruler = { { '1,3     All', 'MsgArea' } },
+      ruler = { { '1,3      All', 'MsgArea' } },
     })
     feed('o<esc>d')
     screen:expect {
@@ -1000,7 +1002,7 @@ describe('ui/ext_messages', function()
         {1:~                        }|*3
       ]],
       showcmd = { { 'd' } },
-      ruler = { { '2,1     All', 'MsgArea' } },
+      ruler = { { '2,1      All', 'MsgArea' } },
     }
     feed('i')
     screen:expect {
@@ -1010,7 +1012,7 @@ describe('ui/ext_messages', function()
         {1:~                        }|*3
       ]],
       showcmd = { { 'di' } },
-      ruler = { { '2,1     All', 'MsgArea' } },
+      ruler = { { '2,1      All', 'MsgArea' } },
     }
     feed('w')
     screen:expect {
@@ -1019,7 +1021,7 @@ describe('ui/ext_messages', function()
         ^                         |
         {1:~                        }|*3
       ]],
-      ruler = { { '2,0-1   All', 'MsgArea' } },
+      ruler = { { '2,0-1    All', 'MsgArea' } },
     }
     command('set rulerformat=Foo%#ErrorMsg#Bar')
     screen:expect({
@@ -1290,7 +1292,7 @@ stack traceback:
         {
           content = { { '' } },
           pos = 0,
-          prompt = 'Type number and <Enter> or click with the mouse (q or empty cancels): ',
+          prompt = 'Type number and <Enter> (q or empty cancels): ',
         },
       },
       messages = {
@@ -1311,7 +1313,7 @@ stack traceback:
         {
           content = { { '1' } },
           pos = 1,
-          prompt = 'Type number and <Enter> or click with the mouse (q or empty cancels): ',
+          prompt = 'Type number and <Enter> (q or empty cancels): ',
         },
       },
     })
@@ -1332,7 +1334,7 @@ stack traceback:
         {
           content = { { '' } },
           pos = 0,
-          prompt = 'Type number and <Enter> or click with the mouse (q or empty cancels): ',
+          prompt = 'Type number and <Enter> (q or empty cancels): ',
         },
       },
       messages = { { content = { { 'input0\ninput1' } }, kind = 'confirm' } },
@@ -1425,7 +1427,7 @@ stack traceback:
       ^                         |
       {1:~                        }|*4
     ]])
-    eq(showmode, 0)
+    eq(0, showmode)
     feed('i')
     screen:expect({
       grid = [[
@@ -1434,17 +1436,17 @@ stack traceback:
       ]],
       showmode = { { '-- INSERT --', 5, 'ModeMsg' } },
     })
-    eq(showmode, 2)
+    eq(2, showmode)
     command('set noshowmode')
     feed('<Esc>')
     screen:expect([[
       ^                         |
       {1:~                        }|*4
     ]])
-    eq(showmode, 3)
+    eq(3, showmode)
     feed('i')
     screen:expect_unchanged()
-    eq(showmode, 3)
+    eq(3, showmode)
   end)
 
   it('emits single message for multiline print())', function()
@@ -1534,7 +1536,7 @@ stack traceback:
         { content = { { 'baz' } }, kind = 'echo', append = true },
       },
     })
-    feed('Q')
+    feed('@@')
     screen:expect({
       grid = [[
         ^                         |
@@ -1542,7 +1544,7 @@ stack traceback:
       ]],
       messages = {
         {
-          content = { { "E354: Invalid register name: '^@'", 9, 'ErrorMsg' } },
+          content = { { 'E748: No previously used register', 9, 'ErrorMsg' } },
           history = true,
           kind = 'emsg',
         },
@@ -1556,7 +1558,7 @@ stack traceback:
       ]],
       msg_history = {
         prev_cmd = true,
-        { content = { { "E354: Invalid register name: '^@'", 9, 'ErrorMsg' } }, kind = 'emsg' },
+        { content = { { 'E748: No previously used register', 9, 'ErrorMsg' } }, kind = 'emsg' },
       },
     })
   end)
@@ -1609,7 +1611,7 @@ stack traceback:
   end)
 
   it('can capture execute("messages"))', function()
-    feed('Q')
+    feed('@@')
     screen:expect({
       grid = [[
         ^                         |
@@ -1617,7 +1619,7 @@ stack traceback:
       ]],
       messages = {
         {
-          content = { { "E354: Invalid register name: '^@'", 9, 'ErrorMsg' } },
+          content = { { 'E748: No previously used register', 9, 'ErrorMsg' } },
           history = true,
           kind = 'emsg',
         },
@@ -1625,7 +1627,7 @@ stack traceback:
     })
     feed(':let msg = execute("messages")<CR>')
     screen:expect_unchanged()
-    eq("E354: Invalid register name: '^@'", eval('msg'):gsub('\n', ''))
+    eq('E748: No previously used register', eval('msg'):gsub('\n', ''))
   end)
 
   it('single event for multi-expr :echo', function()
@@ -1888,25 +1890,11 @@ describe('ui/builtin messages', function()
   end)
 
   it('supports ruler with laststatus=0', function()
-    command('set ruler laststatus=0')
+    command('set laststatus=0 ruler rulerformat=%-15(%c%V\\ %p%%%)')
     screen:expect([[
       ^                                                            |
       {1:~                                                           }|*5
-                                                0,0-1         All |
-    ]])
-
-    command('hi MsgArea guibg=#333333')
-    screen:expect([[
-      ^                                                            |
-      {1:~                                                           }|*5
-      {101:                                          0,0-1         All }|
-    ]])
-
-    command('set rulerformat=%15(%c%V\\ %p%%%)')
-    screen:expect([[
-      ^                                                            |
-      {1:~                                                           }|*5
-      {101:                                          0,0-1 100%        }|
+                                                   0-1 100%       |
     ]])
 
     -- Ruler is cleared when it is no longer drawn.
@@ -1914,7 +1902,21 @@ describe('ui/builtin messages', function()
     screen:expect([[
       ^                                                            |
       {1:~                                                           }|*5
-      {101:                                                            }|
+                                                                  |
+    ]])
+
+    command('set ruler rulerformat&')
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*5
+                                                0,0-1          All|
+    ]])
+
+    command('hi MsgArea guibg=#333333')
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*5
+      {101:                                          0,0-1          All}|
     ]])
   end)
 
@@ -2088,23 +2090,15 @@ describe('ui/builtin messages', function()
   it('prints lines in Ex mode correctly with a burst of carriage returns #19341', function()
     command('set number')
     api.nvim_buf_set_lines(0, 0, 0, true, { 'aaa', 'bbb', 'ccc' })
-    feed('gggQ<CR><CR>1<CR><CR>vi')
+    -- Empty lines advance the cursor and print; a bare address moves and prints.
+    feed('gg1q:<CR><CR>1<CR><CR>')
+    screen:expect({ any = vim.pesc('" bbb') })
+    feed('vi<CR>')
     screen:expect([[
-      Entering Ex mode.  Type "visual" to go to Normal mode.      |
-      {8:  2 }bbb                                                     |
-      {8:  3 }ccc                                                     |
-      :1                                                          |
-      {8:  1 }aaa                                                     |
-      {8:  2 }bbb                                                     |
-      :vi^                                                         |
-    ]])
-    feed('<CR>')
-    screen:expect([[
-      {8:  1 }aaa                                                     |
       {8:  2 }^bbb                                                     |
       {8:  3 }ccc                                                     |
       {8:  4 }                                                        |
-      {1:~                                                           }|*2
+      {1:~                                                           }|*3
                                                                   |
     ]])
   end)
@@ -2598,11 +2592,20 @@ describe('ui/msg_puts_printf', function()
 
     fn.mkdir(locale_dir, 'p')
     fn.filecopy(build_dir .. '/src/nvim/po/ja.mo', locale_dir .. '/nvim.mo')
+    -- "-Es" doesn't read stdin as commands, and the "Entering Ex mode" banner was removed, so
+    -- ":print" a translated message via "-S" (silent mode suppresses ":echo" output). #40966
+    t.write_file(
+      'Xes_ja.vim',
+      [[call setline(1, gettext("Entering Ex mode.  Type \"visual\" to go to Normal mode."))]]
+        .. '\n'
+        .. '.print\n'
+    )
     finally(function()
+      os.remove('Xes_ja.vim')
       n.rmdir(vim.fs.dirname(locale_dir))
     end)
 
-    cmd = cmd .. '"' .. nvim_prog .. '" -u NONE -i NONE -Es -V1'
+    cmd = cmd .. '"' .. nvim_prog .. '" -u NONE -i NONE -Es -S Xes_ja.vim'
     command([[call jobstart(']] .. cmd .. [[',{'term':v:true})]])
     screen:expect([[
       ^Exモードに入ります。ノー |
@@ -3847,13 +3850,33 @@ describe('progress-message', function()
     eq('str-id', id7)
 
     -- internal messages are also assigned an ID (and thus advance the next progress ID)
-    feed('Q')
+    feed('@@')
     local id8 = api.nvim_echo(
       { { 'test-message 30' } },
       true,
       { kind = 'progress', source = 'tests', title = 'TestSuit', percent = 30, status = 'running' }
     )
     eq(8, id8)
+  end)
+
+  it('msg-id is not inherited by the next message #41417', function()
+    local fname = 'Xtest_progress_msgid'
+    finally(function()
+      os.remove(fname)
+    end)
+    -- The write emits nothing ('msg_silent'), but must still release its msg-id.
+    command('silent write ' .. fname)
+    feed(':echoerr "boom"<CR>')
+    screen:expect({
+      messages = {
+        {
+          content = { { 'boom', 9, 'ErrorMsg' } },
+          history = true,
+          id = 1,
+          kind = 'echoerr',
+        },
+      },
+    })
   end)
 
   it('accepts caller-defined id (string)', function()
@@ -3906,6 +3929,60 @@ describe('progress-message', function()
       id = 'str-id',
       data = {},
     })
+  end)
+
+  it('emitted by :write, not by :read #41193', function()
+    local fname = 'Xtest_progress_bufwrite'
+    finally(function()
+      os.remove(fname)
+    end)
+    command('write ' .. fname)
+    assert_progress_autocmd({
+      data = {},
+      id = ('nvim.bufwrite "%s"'):format(fname),
+      source = 'nvim',
+      status = 'success',
+      text = { ('"%s" [New] 0L, 0B written'):format(fname) },
+      title = '',
+    })
+
+    -- ":read" is not a write: it must not start a progress that never ends.
+    command('read ' .. fname)
+    assert_progress_autocmd(nil)
+
+    -- A failed write ends the progress-msg.
+    local events = exec_lua(function(f)
+      local out = {}
+      vim.api.nvim_create_autocmd('Progress', {
+        callback = function(ev)
+          table.insert(out, { id = ev.data.id, status = ev.data.status, text = ev.data.text[1] })
+        end,
+      })
+      pcall(vim.cmd.write, ('%s/nodir'):format(f))
+      return out
+    end, fname)
+    eq({ 'running', 'failed' }, { events[1].status, events[2].status })
+    eq(events[1].id, events[2].id)
+    t.matches('^E%d+:', events[2].text)
+  end)
+
+  it('emitted by ins-completion scan', function()
+    fn.writefile({ 'foobar', 'foobaz' }, 'Xdict')
+    finally(function()
+      os.remove('Xdict')
+    end)
+    exec_lua(function()
+      _G.events = {}
+      vim.api.nvim_create_autocmd('Progress', {
+        callback = function(ev)
+          table.insert(_G.events, ('%s %s'):format(ev.data.id, ev.data.status))
+        end,
+      })
+    end)
+    command('set shortmess-=C complete=kXdict')
+    -- Ends when scanning ends, regardless of whether popupmenu is open.
+    feed('ifoo<C-n>')
+    eq({ 'nvim.completion running', 'nvim.completion success' }, exec_lua('return _G.events'))
   end)
 
   it('tui displays progress message in proper format', function()

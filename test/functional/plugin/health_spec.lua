@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local curbuf_contents = n.curbuf_contents
 local command = n.command
@@ -13,6 +14,7 @@ local source = n.source
 local assert_alive = n.assert_alive
 local fn = n.fn
 local api = n.api
+local retry = t.retry
 
 describe(':checkhealth', function()
   it('detects invalid $VIMRUNTIME', function()
@@ -37,13 +39,15 @@ describe(':checkhealth', function()
     -- Do this after startup, otherwise it just breaks $VIMRUNTIME.
     command("let $VIM='zub'")
     command('checkhealth vim.health')
-    matches('ERROR $VIM .* zub', curbuf_contents())
+    retry(nil, 10000, function()
+      matches('ERROR $VIM .* zub', curbuf_contents())
+    end)
   end)
 
   it('getcompletion()', function()
     clear { args = { '-u', 'NORC', '+set runtimepath+=test/functional/fixtures' } }
 
-    eq('vim.deprecated', getcompletion('vim', 'checkhealth')[1])
+    eq('nvim.zip', getcompletion('vim', 'checkhealth')[1])
     eq('vim.provider', getcompletion('vim.prov', 'checkhealth')[1])
     eq('vim.lsp', getcompletion('vim.ls', 'checkhealth')[1])
 
@@ -154,10 +158,39 @@ describe('vim.health', function()
   end)
 
   describe(':checkhealth', function()
+    it('does not block on vim.health subprocesses', function()
+      exec_lua(function()
+        local system = vim.system
+        vim.system = function(cmd, opts, on_exit)
+          if cmd[1] == 'git' and cmd[2] == 'ls-remote' then
+            _G.resolve_health_system = function()
+              vim.system = system
+              on_exit({ code = 1, signal = 0, stdout = '', stderr = 'failed' })
+            end
+            return
+          end
+          return system(cmd, opts, on_exit)
+        end
+      end)
+
+      command('checkhealth vim.health')
+      eq('function', exec_lua('return type(_G.resolve_health_system)'))
+      eq(true, api.nvim_get_option_value('modifiable', { buf = 0 }))
+
+      command('let g:healthcheck_responsive = v:true')
+      eq(true, exec_lua('return vim.g.healthcheck_responsive'))
+      exec_lua('_G.resolve_health_system()')
+
+      retry(nil, 5000, function()
+        eq(false, api.nvim_get_option_value('modifiable', { buf = 0 }))
+      end)
+      eq('checkhealth', api.nvim_get_option_value('filetype', { buf = 0 }))
+      matches('vim%.health:', curbuf_contents())
+    end)
+
     it('report_xx() renders correctly', function()
       command('checkhealth full_render')
       n.expect([[
-
       ==============================================================================
       test_plug.full_render:                                              1 ⚠️  1 ❌
 
@@ -184,7 +217,6 @@ describe('vim.health', function()
         checkhealth full_render
       ]]
       n.expect([[
-
       ==============================================================================
       test_plug.full_render:                                              1  1
 
@@ -206,8 +238,10 @@ describe('vim.health', function()
 
     it('concatenates multiple reports', function()
       command('checkhealth success1 success2 test_plug')
+      retry(nil, 5000, function()
+        eq(false, api.nvim_get_option_value('modifiable', { buf = 0 }))
+      end)
       n.expect([[
-
         ==============================================================================
         test_plug:                                                                  ✅
 
@@ -237,7 +271,6 @@ describe('vim.health', function()
     it('lua plugins submodules', function()
       command('checkhealth test_plug.submodule')
       n.expect([[
-
         ==============================================================================
         test_plug.submodule:                                                        ✅
 
@@ -252,7 +285,6 @@ describe('vim.health', function()
     it('... including empty reports', function()
       command('checkhealth test_plug.submodule_empty')
       n.expect([[
-
       ==============================================================================
       test_plug.submodule_empty:                                                1 ❌
 
@@ -261,7 +293,7 @@ describe('vim.health', function()
     end)
 
     it('highlights OK, ERROR', function()
-      local screen = Screen.new(50, 12)
+      local screen = Screen.new(50, 11)
       screen:set_default_attr_ids({
         h1 = { reverse = true },
         h2 = { foreground = tonumber('0x6a0dad') },
@@ -271,11 +303,14 @@ describe('vim.health', function()
         Bar = { foreground = Screen.colors.LightGrey, background = Screen.colors.DarkGrey },
       })
       command('checkhealth foo success1')
+      -- Wait for the filetype plugin before changing window options.
+      retry(nil, 5000, function()
+        eq('checkhealth', api.nvim_get_option_value('filetype', { buf = 0 }))
+      end)
       command('set nofoldenable nowrap laststatus=0')
       screen:expect {
         grid = [[
-        ^                                                  |
-        {Bar:                                                  }|
+        {Bar:^                                                  }|
         {h1:foo:                                              }|
                                                           |
         - ❌ {Error:ERROR} No healthcheck found for "foo" plugin. |
@@ -294,7 +329,6 @@ describe('vim.health', function()
       command('checkhealth non_existent_healthcheck')
       -- luacheck: ignore 613
       n.expect([[
-
         ==============================================================================
         non_existent_healthcheck:                                                 1 ❌
 
@@ -312,7 +346,6 @@ describe('vim.health', function()
     it('nested lua/ directory', function()
       command('checkhealth lua')
       n.expect([[
-
       ==============================================================================
       test_plug.lua:                                                              ✅
 
@@ -330,7 +363,6 @@ describe('vim.health', function()
       command('packadd healthy')
       command('checkhealth nest')
       n.expect([[
-
       ==============================================================================
       nest:                                                                       ✅
 
@@ -348,7 +380,7 @@ describe(':checkhealth window', function()
   end)
 
   it('opens directly if no buffer created', function()
-    local screen = Screen.new(50, 12, { ext_multigrid = true })
+    local screen = Screen.new(50, 11, { ext_multigrid = true })
     screen:set_default_attr_ids {
       h1 = { reverse = true },
       h2 = { foreground = tonumber('0x6a0dad') },
@@ -361,11 +393,10 @@ describe(':checkhealth window', function()
     screen:expect {
       grid = [[
     ## grid 1
-      [2:--------------------------------------------------]|*11
+      [2:--------------------------------------------------]|*10
       [3:--------------------------------------------------]|
     ## grid 2
-      ^                                                  |
-      {14:                                                  }|
+      {14:^                                                  }|
       {14:                            }                      |
       {h1:test_plug.                                        }|
       {h1:success1:                                         }|
@@ -382,7 +413,7 @@ describe(':checkhealth window', function()
   end)
 
   local function test_health_vsplit(left, emptybuf, mods)
-    local screen = Screen.new(50, 20, { ext_multigrid = true })
+    local screen = Screen.new(50, 19, { ext_multigrid = true })
     screen:set_default_attr_ids {
       h1 = { reverse = true },
       h2 = { foreground = tonumber('0x6a0dad') },
@@ -402,12 +433,12 @@ describe(':checkhealth window', function()
       [3:--------------------------------------------------]|
     ## grid 2
       %s                   |
-      {1:~                       }|*18
+      {1:~                       }|*17
     ## grid 3
       {Done:checkhealth}: checks done                          |
     ## grid 4
-      ^                         |
-      {14:                         }|*3
+      {14:^                         }|
+      {14:                         }|*2
       {14:   }                      |
       {h1:test_plug.               }|
       {h1:success1:                }|
@@ -424,8 +455,8 @@ describe(':checkhealth window', function()
                                |
       {1:~                        }|
     ]]):format(
-        left and '[4:-------------------------]│[2:------------------------]|*19'
-          or '[2:------------------------]│[4:-------------------------]|*19',
+        left and '[4:-------------------------]│[2:------------------------]|*18'
+          or '[2:------------------------]│[4:-------------------------]|*18',
         emptybuf and '     ' or 'hello'
       )
     )
@@ -468,7 +499,7 @@ describe(':checkhealth window', function()
       checkhealth: checks done                          |
     ## grid 4
       ^                                                  |
-                                                        |*2
+                                                        |
       test_plug.                                        |
       success1:                                         |
                       ✅                                |
@@ -478,6 +509,7 @@ describe(':checkhealth window', function()
                                                         |
       report 2                                          |
       - ✅ OK nothing to see here                       |
+                                                        |
     ]]):format(
         top
             and [[

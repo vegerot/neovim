@@ -20,16 +20,16 @@
 #include "nvim/decoration.h"
 #include "nvim/diff.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval/typval.h"
 #include "nvim/eval/window.h"
 #include "nvim/fold.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
 #include "nvim/grid_defs.h"
+#include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mark_defs.h"
 #include "nvim/mbyte.h"
@@ -99,6 +99,24 @@ static void comp_botline(win_T *wp)
   // If w_cline_row is valid, start there.
   // Otherwise have to start at w_topline.
   check_cursor_moved(wp);
+
+  // The wl_size values computed for the previous redraw give the height of
+  // each displayed line.  When the display is up-to-date they are equal to
+  // what plines_correct_topline() would compute, so reuse them to avoid
+  // walking every line to measure its width on each scroll (like curs_rows()
+  // does).  Only trust them when actually redrawing, the buffer was not
+  // changed, no "$" is displayed for a change and w_lines[] starts at or
+  // above w_topline.  With 'smoothscroll' or filled lines wl_size includes
+  // the skipped rows of the top line and the filler lines, so it does not
+  // match plines_correct_topline(); do not use the cache then.
+  bool use_cache = redrawing()
+                   && !wp->w_buffer->b_mod_set
+                   && dollar_vcol == -1
+                   && wp->w_skipcol == 0
+                   && !win_may_fill(wp)
+                   && wp->w_lines_valid > 0
+                   && wp->w_lines[0].wl_lnum <= wp->w_topline;
+
   if (wp->w_valid & VALID_CROW) {
     lnum = wp->w_cursor.lnum;
     done = wp->w_cline_row;
@@ -107,10 +125,39 @@ static void comp_botline(win_T *wp)
     done = 0;
   }
 
-  for (; lnum <= wp->w_buffer->b_ml.ml_line_count; lnum++) {
+  // Find the w_lines[] entry for the starting line.
+  int i = 0;
+  if (use_cache) {
+    while (i < wp->w_lines_valid && wp->w_lines[i].wl_lnum < lnum) {
+      i++;
+    }
+  }
+
+  for (; lnum <= wp->w_buffer->b_ml.ml_line_count; i++) {
+    bool valid = false;
+    // Try to use the size from the previous redraw.
+    if (use_cache && i < wp->w_lines_valid) {
+      if (wp->w_lines[i].wl_lnum < lnum || !wp->w_lines[i].wl_valid) {
+        continue;               // skip changed or deleted lines
+      }
+      if (wp->w_lines[i].wl_lnum == lnum) {
+        valid = true;
+      } else {  // wl_lnum > lnum
+        i--;                    // hold at inserted lines
+      }
+    }
     linenr_T last = lnum;
     bool folded;
-    int n = plines_correct_topline(wp, lnum, &last, true, &folded);
+    int n;
+    // The cache is not used with 'smoothscroll' or filler lines, so here
+    // wl_size holds the same height as plines_correct_topline().
+    if (valid) {
+      n = wp->w_lines[i].wl_size;
+      folded = wp->w_lines[i].wl_folded;
+      last = wp->w_lines[i].wl_lastlnum;
+    } else {
+      n = plines_correct_topline(wp, lnum, &last, true, &folded);
+    }
     if (lnum <= wp->w_cursor.lnum && last >= wp->w_cursor.lnum) {
       wp->w_cline_row = done;
       wp->w_cline_height = n;
@@ -122,7 +169,7 @@ static void comp_botline(win_T *wp)
       break;
     }
     done += n;
-    lnum = last;
+    lnum = last + 1;
   }
 
   // wp->w_botline is the line that is just below the window
@@ -176,7 +223,7 @@ static void redraw_for_cursorcolumn(win_T *wp)
   }
 
   // When current buffer's cursor moves in Visual mode, redraw it with UPD_INVERTED.
-  if (VIsual_active && wp->w_buffer == curbuf) {
+  if (Visual.active && wp->w_buffer == curbuf) {
     redraw_buf_later(curbuf, UPD_INVERTED);
   }
 }
@@ -614,6 +661,34 @@ void set_topline(win_T *wp, linenr_T lnum)
   redraw_later(wp, UPD_VALID);
 }
 
+/// Saves the view of `wp`, for restore_viewstate().
+void save_viewstate(win_T *wp, viewstate_T *vs)
+  FUNC_ATTR_NONNULL_ALL
+{
+  vs->vs_curswant = wp->w_curswant;
+  vs->vs_set_curswant = wp->w_set_curswant;
+  vs->vs_leftcol = wp->w_leftcol;
+  vs->vs_skipcol = wp->w_skipcol;
+  vs->vs_topline = wp->w_topline;
+  vs->vs_topfill = wp->w_topfill;
+  vs->vs_botline = wp->w_botline;
+  vs->vs_empty_rows = wp->w_empty_rows;
+}
+
+/// Restores the view saved by save_viewstate(). No validation.
+void restore_viewstate(win_T *wp, const viewstate_T *vs)
+  FUNC_ATTR_NONNULL_ALL
+{
+  wp->w_curswant = vs->vs_curswant;
+  wp->w_set_curswant = vs->vs_set_curswant;
+  wp->w_leftcol = vs->vs_leftcol;
+  wp->w_skipcol = vs->vs_skipcol;
+  wp->w_topline = vs->vs_topline;
+  wp->w_topfill = vs->vs_topfill;
+  wp->w_botline = vs->vs_botline;
+  wp->w_empty_rows = vs->vs_empty_rows;
+}
+
 /// Call this function when the length of the cursor line (in screen
 /// characters) has changed, and the change is before the cursor.
 /// If the line length changed the number of screen lines might change,
@@ -823,7 +898,7 @@ int win_col_off(win_T *wp)
 int win_col_off2(win_T *wp)
 {
   if ((wp->w_p_nu || wp->w_p_rnu || *wp->w_p_stc != NUL)
-      && vim_strchr(p_cpo, CPO_NUMCOL) != NULL) {
+      && vim_strchr(p_cpo, kCpoNumcol) != NULL) {
     return number_width(wp) + (*wp->w_p_stc == NUL);
   }
   return 0;
@@ -1896,9 +1971,19 @@ void scroll_cursor_top(win_T *wp, int min_scroll, int always)
     } else if (wp->w_topline == wp->w_cursor.lnum) {
       validate_virtcol(wp);
       if (wp->w_skipcol >= wp->w_virtcol) {
-        // TODO(vim): if the line doesn't fit may optimize w_skipcol instead
-        // of making it zero
-        reset_skipcol(wp);
+        // Skip up to the screen line the cursor is in, so that the
+        // position in the line is kept.
+        int width1 = wp->w_view_width - win_col_off(wp);
+        int width2 = width1 + win_col_off2(wp);
+        int plines_off = 0;
+        if (width2 > 0 && wp->w_virtcol >= width1) {
+          plines_off = (wp->w_virtcol - width1) / width2 + 1;
+        }
+        int skipcol = skipcol_from_plines(wp, plines_off);
+        if (skipcol != wp->w_skipcol) {
+          wp->w_skipcol = skipcol;
+          redraw_later(wp, UPD_SOME_VALID);
+        }
       }
     }
     if (wp->w_topline != old_topline
@@ -2066,6 +2151,7 @@ void scroll_cursor_bot(win_T *wp, int min_scroll, bool set_topbot)
       break;
     }
 
+    linenr_T loff_lnum_before = loff.lnum;
     // Add one line above
     topline_back(wp, &loff);
     if (loff.height == MAXCOL) {
@@ -2081,13 +2167,13 @@ void scroll_cursor_bot(win_T *wp, int min_scroll, bool set_topbot)
             || loff.fill <= fill_below_window)) {
       // Count screen lines that are below the window.
       scrolled += loff.height;
-      if (loff.lnum == wp->w_botline
-          && loff.fill == 0) {
+      if (loff.lnum == wp->w_botline && loff_lnum_before > curwin->w_botline) {
         scrolled -= wp->w_empty_rows;
       }
     }
 
     if (boff.lnum < wp->w_buffer->b_ml.ml_line_count) {
+      linenr_T boff_lnum_before = boff.lnum;
       // Add one line below
       botline_forw(wp, &boff);
       assert(boff.height != MAXCOL);
@@ -2103,8 +2189,7 @@ void scroll_cursor_bot(win_T *wp, int min_scroll, bool set_topbot)
                 && boff.fill > wp->w_filler_rows)) {
           // Count screen lines that are below the window.
           scrolled += boff.height;
-          if (boff.lnum == wp->w_botline
-              && boff.fill == 0) {
+          if (boff.lnum >= curwin->w_botline && boff_lnum_before < curwin->w_botline) {
             scrolled -= wp->w_empty_rows;
           }
         }
@@ -2194,6 +2279,8 @@ void scroll_cursor_halfway(win_T *wp, bool atend, bool prefer_above)
   }
 
   int topfill = 0;
+  int above = 0;
+  int below = 0;
   while (topline > 1) {
     // If using smoothscroll, we can precisely scroll to the
     // exact point where the cursor is halfway down the screen.
@@ -2228,8 +2315,6 @@ void scroll_cursor_halfway(win_T *wp, bool atend, bool prefer_above)
     // Depending on "prefer_above" we add a line above or below first.
     // Loop twice to avoid duplicating code.
     bool done = false;
-    int above = 0;
-    int below = 0;
     for (int round = 1; round <= 2; round++) {
       if (prefer_above
           ? (round == 2 && below < above)
@@ -2316,9 +2401,9 @@ void cursor_correct(win_T *wp)
   validate_botline_win(wp);
   if (wp->w_botline == wp->w_buffer->b_ml.ml_line_count + 1
       && mouse_dragging == 0) {
-    if (!use_scrolloffpad(wp)) {
-      below_wanted = 0;
-    }
+    // Missing context below EOF must not move the cursor up.  Automatic
+    // scrolling handles the centering for 'scrolloffpad'.
+    below_wanted = 0;
     int max_off = (wp->w_view_height - 1) / 2;
     above_wanted = MIN(above_wanted, max_off);
   }
@@ -2330,16 +2415,6 @@ void cursor_correct(win_T *wp)
       && cln < wp->w_botline - below_wanted
       && !win_lines_concealed(wp)) {
     return;
-  }
-
-  if (wp->w_p_sms && !wp->w_p_wrap) {
-    // 'smoothscroll' is active
-    if (wp->w_cline_height == wp->w_view_height) {
-      // The cursor line just fits in the window, don't scroll.
-      reset_skipcol(wp);
-      return;
-    }
-    // TODO(vim): If the cursor line doesn't fit in the window then only adjust w_skipcol.
   }
 
   // Narrow down the area where the cursor can be put by taking lines from
@@ -2588,12 +2663,21 @@ int pagescroll(Direction dir, int count, bool half)
 void do_check_cursorbind(void)
 {
   static win_T *prev_curwin = NULL;
+  static buf_T *prev_curbuf = NULL;
+  static varnumber_T prev_changedtick = 0;
   static pos_T prev_cursor = { 0, 0, 0 };
 
-  if (curwin == prev_curwin && equalpos(curwin->w_cursor, prev_cursor)) {
+  assert(curwin != NULL && curbuf != NULL);
+  // Nothing to do when the cursor didn't move and the text didn't change.
+  // After a change the corresponding line in a diff may be different.
+  if (curwin == prev_curwin && curbuf == prev_curbuf
+      && buf_get_changedtick(curbuf) == prev_changedtick
+      && equalpos(curwin->w_cursor, prev_cursor)) {
     return;
   }
   prev_curwin = curwin;
+  prev_curbuf = curbuf;
+  prev_changedtick = buf_get_changedtick(curbuf);
   prev_cursor = curwin->w_cursor;
 
   linenr_T line = curwin->w_cursor.lnum;
@@ -2603,11 +2687,11 @@ void do_check_cursorbind(void)
   bool set_curswant = curwin->w_set_curswant;
   win_T *old_curwin = curwin;
   buf_T *old_curbuf = curbuf;
-  int old_VIsual_select = VIsual_select;
-  int old_VIsual_active = VIsual_active;
+  int old_VIsual_select = Visual.select;
+  int old_VIsual_active = Visual.active;
 
   // loop through the cursorbound windows
-  VIsual_select = VIsual_active = false;
+  Visual.select = Visual.active = false;
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
     curwin = wp;
     curbuf = curwin->w_buffer;
@@ -2652,8 +2736,8 @@ void do_check_cursorbind(void)
   }
 
   // reset current-window
-  VIsual_select = old_VIsual_select;
-  VIsual_active = old_VIsual_active;
+  Visual.select = old_VIsual_select;
+  Visual.active = old_VIsual_active;
   curwin = old_curwin;
   curbuf = old_curbuf;
 }

@@ -17,6 +17,9 @@ error('Cannot require a meta file')
 --- @field force? boolean
 --- @field unload? boolean
 
+--- @class vim.api.keyset.chan_set
+--- @field detach? boolean
+
 --- @class vim.api.keyset.clear_autocmds
 --- @field buf? integer
 --- @field buffer? integer
@@ -26,12 +29,12 @@ error('Cannot require a meta file')
 
 --- @class vim.api.keyset.cmd
 --- @field addr? "line"|"arg"|"buf"|"load"|"win"|"tab"|"qf"|"none"|"?"
---- @field args? string[]
+--- @field args? (integer|string|boolean)[]
 --- @field bang? boolean
 --- @field cmd? string
 --- @field count? integer
 --- @field magic? vim.api.keyset.cmd.magic
---- @field mods? vim.api.keyset.cmd.mods
+--- @field mods? vim.api.keyset.cmd_mods
 --- @field nargs? integer|"?"|"+"|"*"
 --- @field nextcmd? string
 --- @field range? integer[]
@@ -45,7 +48,7 @@ error('Cannot require a meta file')
 --- @field browse? boolean
 --- @field confirm? boolean
 --- @field emsg_silent? boolean
---- @field filter? table<string,any>
+--- @field filter? vim.api.keyset.cmd_mods_filter
 --- @field hide? boolean
 --- @field horizontal? boolean
 --- @field keepalt? boolean
@@ -57,7 +60,7 @@ error('Cannot require a meta file')
 --- @field noswapfile? boolean
 --- @field sandbox? boolean
 --- @field silent? boolean
---- @field split? string
+--- @field split? ""|"botright"|"topleft"|"belowright"|"aboveleft"|"rightbelow"|"leftabove"
 --- @field tab? integer
 --- @field unsilent? boolean
 --- @field verbose? integer
@@ -105,6 +108,7 @@ error('Cannot require a meta file')
 --- |'ChanClose'
 --- |'ChanInfo'
 --- |'ChanOpen'
+--- |'CmdAtom'
 --- |'CmdUndefined'
 --- |'CmdlineChanged'
 --- |'CmdlineEnter'
@@ -373,6 +377,9 @@ error('Cannot require a meta file')
 --- @field silent? boolean
 --- @field unique? boolean
 
+--- @class vim.api.keyset.keymap_del
+--- @field lhs? boolean
+
 --- @class vim.api.keyset.ns_opts
 --- @field wins? any[]
 
@@ -472,7 +479,7 @@ error('Cannot require a meta file')
 
 --- @class vim.api.keyset.win_config
 --- @field anchor? "NW"|"NE"|"SW"|"SE"
---- @field border? any[]|"none"|"single"|"double"|"rounded"|"solid"|"shadow"
+--- @field border? any[]|""|"none"|"single"|"double"|"rounded"|"solid"|"shadow"|"bold"
 --- @field bufpos? integer[]
 --- @field col? number
 --- @field external? boolean

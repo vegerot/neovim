@@ -55,7 +55,8 @@ Vimscript commands are described below.
 			they execute in the order in which they were defined.
 			See |autocmd-nested| for [++nested].
 							*autocmd-once*
-			If [++once] is supplied the command is executed once,
+			If [++once] is supplied the command is executed once
+			(per {event}, which may be a comma-separated list),
 			then removed ("one shot").
 
 The special pattern <buffer> or <buffer=N> defines a buffer-local autocommand.
@@ -419,6 +420,95 @@ ChanOpen			Just after a channel was opened.
 				Sets these |v:event| keys:
 				    info	as from |nvim_get_chan_info()|
 
+							*CmdAtom*
+CmdAtom				After a user action (an "atom" of input): any
+				normal command, motion, operator, insert
+				session, Visual sequence, Ex cmdline
+				(":cnext<CR>"), mapping (and subatoms), macro,
+				or scroll/mouse.
+
+				<amatch> is the atom "type" (see below).
+				Event is |deferred|.
+
+				Only for user input, not programmatic input:
+					INPUT			ATOM ~
+					Typed keys		yes
+					Mapping, macro "@q"	yes
+					|nvim_input()|		yes
+					|nvim_feedkeys()|	with "t" (see note)
+					Hydrogen		yes
+					|:normal|		no
+					API requests		no
+					"@q" fed by a script	no
+					|multicursor| cascade	no
+					Aborted operation	no
+					Terminal-mode keys	no
+					Mouse drag/release	no (TODO?)
+
+				Note: All keys fed during a mapping execution
+				are part of the resolved `keys`. But entering
+				|Terminal-mode| (e.g. a picker/fuzzy-finder
+				UI) completes the atom: terminal input is not
+				captured, because there is no defined way to
+				delimit the "end" of such an action.
+
+				Plugins should not publish "fake" CmdAtom
+				events via `nvim_exec_autocmds`.
+
+				The |event-data| has these fields (type: `vim.event.cmdatom.data`):
+
+				- atoms: Ordered "subatoms" of a composite
+				  atom (complex mapping, Visual sequence).
+				- changed: Buffer was changed by the command.
+				- cmd: Command/motion/object name: "w", "f",
+				  "iw", "gJ", "<Home>", …. |key-notation|
+				- cmdarg: Operand of `cmd`: the "x" of "fx",
+				  the replacement char of |r|. |key-notation|
+				- count: Effective |count|, or nil.
+				- keys:	Resolved (post-mapping) keysequence.
+				  Raw internal bytes (use |keytrans()| to get
+				  key-notation): feed to |nvim_feedkeys()|
+				  (mode "n") to replay. Empty: unreplayable.
+				  Nil: lossy capture, replay `lhs` (mode "m").
+				- lhs: User input, before it is resolved.
+				  Mapping LHS plus any payload it read
+				  (|getchar()|), macro register ("@q"), or
+				  Visual sequence. Raw bytes, like `keys`.
+				- motionforce |forced-motion|: "v", "V", or
+				  "<C-V>" (|key-notation|).
+				- moved: Cursor moved. May be `false` even if
+				  the action is classified as a "motion" (e.g.
+				  "w" at buffer end, failed "fx").
+				- operator: Operator: "d", "g@", "zf", ….
+				  |key-notation|, like `cmd`.
+				- pos: Start position: [row, col], 1-indexed
+				  row, 0-indexed col.
+				- reg: Register name.
+				- text: Payload: full text of an insert
+				  session, Ex cmdline, or search. Raw bytes,
+				  like `keys`.
+				  Examples:
+				    - typed "iab<Esc>" → text="ab"
+				    - typed ":cnext<CR>" → text="cnext"
+				    - typed "<Cmd>cnext<CR>" → text="cnext"
+				    - typed "iab<Left>c<Esc>" → text="c"
+				- type:
+				    - "excmd": Ex cmdline session.
+				    - "insert": Insert session.
+				    - "jump": Absolute motion ("G", marks,
+				      "H", |jumplist|).
+				    - "mapping": Composite (≥2 subatoms).
+				    - "motion": Cursor-relative motion ("w",
+				      "%", "fx", "*").
+				    - "mouse"
+				    - "normal": Other commands ("u", CTRL-R,
+				      "za", CTRL-W, …).
+				    - "operator"
+				    - "scroll": Viewport scroll.
+				    - "visual": Visual composite.
+				- undoseq: Undo state after the action
+				  (|undotree()| `seq_cur`). Decreases on undo.
+
 							*CmdlineChanged*
 CmdlineChanged			After EVERY change inside command line. Also
 				triggered during mappings! Use |<Cmd>| instead
@@ -611,17 +701,19 @@ DiffUpdated			After diffs have been updated.  Depending on
 				what kind of diff is being used (internal or
 				external) this can be triggered on every
 				change or when doing |:diffupdate|.
+				It is not allowed to change the window layout.
 
 							*DirChanged*
 DirChanged			After the |current-directory| was changed.
 				The pattern can be:
-					"window"  to trigger on `:lcd`
-					"tabpage" to trigger on `:tcd`
-					"global"  to trigger on `:cd`
-					"auto"    to trigger on 'autochdir'.
+					"auto"    triggered on 'autochdir'.
+					"buffer"  triggered on `:bcd`.
+					"global"  triggered on `:cd`.
+					"tabpage" triggered on `:tcd`.
+					"window"  triggered on `:lcd`.
 				Sets these |v:event| keys:
 				    cwd:            current working directory
-				    scope:          "global", "tabpage", "window"
+				    scope:          "global", "tabpage", "window", "buffer"
 				    changed_window: v:true if we fired the event
 				                    switching window (or tab)
 				<afile> is set to the new directory name.
@@ -633,7 +725,7 @@ DirChangedPre			When the |current-directory| is going to be
 				The pattern is like with |DirChanged|.
 				Sets these |v:event| keys:
 				    directory:      new working directory
-				    scope:          "global", "tabpage", "window"
+				    scope:          "global", "tabpage", "window", "buffer"
 				    changed_window: v:true if we fired the event
 				                    switching window (or tab)
 				<afile> is set to the new directory name.
@@ -686,7 +778,7 @@ FileChangedShell		When Vim notices that the modification time of
 				change or when the size of the file changes.
 				|timestamp|
 				Triggered for each changed file, after:
-				- executing a shell command
+				- executing a shell command or |:terminal| job
 				- |:checktime|
 				- |FocusGained|
 
@@ -809,6 +901,8 @@ InsertCharPre			When a character is typed in Insert mode,
 				a different character.  When |v:char| is set
 				to more than one character this text is
 				inserted literally.
+
+				Not triggered for |.| redo, |i_CTRL-R|, |i_CTRL-A|.
 
 				Cannot change the text. |textlock|
 
@@ -1076,8 +1170,9 @@ SessionWritePost		After writing a session file by calling
 ShellCmdPost			After executing a shell command with |:!cmd|,
 				|:make| and |:grep|.  Can be used to check for
 				any changed files.
+
 				For non-blocking shell commands, see
-				|job-control|.
+				|TermClose| |job-control|.
 
 							*ShellFilterPost*
 ShellFilterPost			After executing a shell command with
@@ -1230,7 +1325,8 @@ TermRequest			When a |:terminal| child process emits an OSC,
 				autocommand defined without |autocmd-nested|.
 
 							*TermResponse*
-TermResponse			When Nvim receives a DA1, OSC, DCS, or APC response from
+TermResponse			When Nvim receives an OSC, DCS, APC, or recognized
+				CSI (DA1, kitty multiple-cursors) response from
 				the host terminal. Sets |v:termresponse|.
 
 				The |event-data| has these keys (type: `vim.event.termresponse.data`):
@@ -1401,10 +1497,13 @@ VimLeavePre			Before exiting Vim, just before writing the
 				Not triggered if |v:dying| is 2 or more.
 
 							*VimResized*
-VimResized			After the Vim window was resized, thus 'lines'
-				and/or 'columns' changed.  Not when starting
-				up though.
+VimResized			After Nvim itself was resized: 'lines' and/or
+				'columns' changed.  But not during |startup|.
 
+				To ensure the window layout is always
+				"equalized" on resize: >
+				    :autocmd VimResized * wincmd =
+<
 							*VimResume*
 VimResume			After Nvim resumes from |suspend| state.
 
@@ -1985,7 +2084,7 @@ and "++ff=" argument that are effective.  These should be used for the command
 that reads/writes the file.  The |v:cmdbang| variable is one when "!" was
 used, zero otherwise.
 
-See the $VIMRUNTIME/pack/dist/opt/netrw/plugin/netrwPlugin.vim for examples.
+See $VIMRUNTIME/plugin/net.lua for examples.
 
 ==============================================================================
 11. Disabling autocommands				*autocmd-disable*

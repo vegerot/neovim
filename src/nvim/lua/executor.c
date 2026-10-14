@@ -20,6 +20,7 @@
 #include "nvim/ascii_defs.h"
 #include "nvim/buffer_defs.h"
 #include "nvim/change.h"
+#include "nvim/channel.h"
 #include "nvim/cmdexpand_defs.h"
 #include "nvim/cursor.h"
 #include "nvim/drawscreen.h"
@@ -38,9 +39,9 @@
 #include "nvim/ex_getln.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
+#include "nvim/input.h"
 #include "nvim/keycodes.h"
 #include "nvim/lua/converter.h"
 #include "nvim/lua/executor.h"
@@ -99,6 +100,11 @@ typedef struct {
   size_t size;
 } ModuleDef;
 
+typedef struct {
+  LuaRef getline;  ///< Lua function returning the next input line, or nil at EOF.
+  bool got_line;   ///< True if at least one line was read.
+} ExDocmdCookie;
+
 #include "lua/executor.c.generated.h"
 #include "lua/vim_module.generated.h"
 
@@ -111,7 +117,7 @@ typedef struct {
     } \
   }
 
-/// Pushes cmdmod_T as a table (Lua type: `vim.api.keyset.cmd_mods`) onto the stack.
+/// Pushes cmdmod_T as a table (Lua type: `vim.api.keyset.cmd_mods_ret`) onto the stack.
 static void nlua_push_cmdmod(lua_State *lstate, const cmdmod_T *cmod)
 {
   lua_newtable(lstate);
@@ -309,21 +315,40 @@ void nlua_error(lua_State *const lstate, const char *const msg)
   lua_pop(lstate, 1);
 }
 
-/// Like lua_pcall, but use debug.traceback as errfunc.
+/// Dummy errfunc used if `_G.debug.traceback` is broken: returns the error object unchanged.
+static int nlua_no_traceback(lua_State *lstate)
+{
+  return 1;
+}
+
+/// Like lua_pcall, but use `debug.traceback` as errfunc. Called by most Lua entrypoints (`:lua`,
+/// `luaeval()`, `v:lua`, API calls, …). Not used by `pcall()` itself.
 ///
 /// @param lstate Lua interpreter state
 /// @param[in] nargs Number of arguments expected by the function being called.
 /// @param[in] nresults Number of results the function returns.
 int nlua_pcall(lua_State *lstate, int nargs, int nresults)
 {
+  // Detect broken `_G.debug` (by user code). #41504
   lua_getglobal(lstate, "debug");
-  lua_getfield(lstate, -1, "traceback");
-  lua_remove(lstate, -2);
+  if (lua_istable(lstate, -1)) {
+    lua_getfield(lstate, -1, "traceback");
+    lua_remove(lstate, -2);
+  }
+  bool no_traceback = !lua_isfunction(lstate, -1);  // `_G.debug.traceback` is a function?
+  if (no_traceback) {
+    lua_pop(lstate, 1);
+    lua_pushcfunction(lstate, nlua_no_traceback);
+  }
   lua_insert(lstate, -2 - nargs);
   int pre_top = lua_gettop(lstate);
   int status = lua_pcall(lstate, nargs, nresults, -2 - nargs);
   if (status) {
     lua_remove(lstate, -2);
+    if (no_traceback && status == LUA_ERRRUN && lua_isstring(lstate, -1)) {
+      lua_pushliteral(lstate, "\nNo traceback: debug.traceback is not a function");
+      lua_concat(lstate, 2);
+    }
   } else {
     if (nresults == LUA_MULTRET) {
       nresults = lua_gettop(lstate) - (pre_top - nargs - 1);
@@ -595,6 +620,44 @@ static int nlua_check_interrupt(lua_State *lstate)
   }
 
   lua_pushboolean(lstate, interrupted);
+  return 1;
+}
+
+/// LineGetter for nlua_ex_docmd(): calls the Lua `getline` function.
+static char *nlua_ex_getline(int c, void *cookie, int indent, bool do_concat)
+{
+  ExDocmdCookie *ecd = cookie;
+  lua_State *lstate = global_lstate;
+  nlua_pushref(lstate, ecd->getline);
+  if (nlua_pcall(lstate, 0, 1)) {
+    nlua_error(lstate, _("Error executing Ex-mode line getter: %.*s"));
+    return NULL;
+  }
+  if (lua_type(lstate, -1) != LUA_TSTRING) {  // nil: EOF.
+    lua_pop(lstate, 1);
+    return NULL;
+  }
+  char *line = xstrdup(lua_tostring(lstate, -1));
+  lua_pop(lstate, 1);
+  ecd->got_line = true;
+  return line;
+}
+
+/// For exmode.lua: Executes one cmdline obtained from `getline`, which is also called for any
+/// continuation lines (`:append` text, `:function` body, heredoc, …). Unlike `nvim_exec2()`, errors
+/// are emitted (not thrown), so the caller can continue with the next command. #40966
+static int nlua_ex_docmd(lua_State *lstate)
+  FUNC_ATTR_NONNULL_ALL
+{
+  luaL_checktype(lstate, 1, LUA_TFUNCTION);
+  ExDocmdCookie cookie = { .getline = nlua_ref_global(lstate, 1) };
+  msg_scroll = true;
+  need_wait_return = false;
+  no_wait_return++;  // Don't wait for return, e.g. after "-V1" messages.
+  do_cmdline(NULL, nlua_ex_getline, &cookie, 0);
+  no_wait_return--;
+  nlua_unref_global(lstate, cookie.getline);
+  lua_pushboolean(lstate, cookie.got_line);
   return 1;
 }
 
@@ -900,7 +963,7 @@ static bool nlua_state_init(lua_State *const lstate) FUNC_ATTR_NONNULL_ALL
 
   nlua_common_vim_init(lstate, false);
 
-  // vim._core wait helpers
+  // Bindings for `vim.wait()`.
   lua_getfield(lstate, -1, "_core");
   lua_pushcfunction(lstate, &nlua_loop_poll);
   lua_setfield(lstate, -2, "loop_poll");
@@ -908,6 +971,10 @@ static bool nlua_state_init(lua_State *const lstate) FUNC_ATTR_NONNULL_ALL
   lua_setfield(lstate, -2, "ui_flush");
   lua_pushcfunction(lstate, &nlua_check_interrupt);
   lua_setfield(lstate, -2, "check_interrupt");
+
+  // Misc vim._core bindings.
+  lua_pushcfunction(lstate, &nlua_ex_docmd);
+  lua_setfield(lstate, -2, "ex_docmd");
   lua_pop(lstate, 1);
 
   // patch require() (only for --startuptime)
@@ -1014,12 +1081,14 @@ static lua_State *nlua_init_state(bool thread)
   return lstate;
 }
 
+/// Disposes global Lua state. Idempotent, harmless if called multiple times.
 void nlua_free_all_mem(void)
 {
   if (!global_lstate) {
     return;
   }
   lua_State *lstate = global_lstate;
+  global_lstate = NULL;
   nlua_unref_global(lstate, require_ref);
   nlua_common_free_all_mem(lstate);
   nlua_treesitter_free();
@@ -1049,12 +1118,14 @@ static void nlua_common_free_all_mem(lua_State *lstate)
 
 static void nlua_print_event(void **argv)
 {
+  msg_ext_no_fast();
+  bool raw = msg_use_printf() && !redirecting() && on_print.type == kCallbackNone;
+
   HlMessage msg = KV_INITIAL_VALUE;
   HlMessageChunk chunk = { { .data = argv[0], .size = (size_t)(intptr_t)argv[1] - 1 }, 0 };
   kv_push(msg, chunk);
   bool needs_clear = false;
-  msg_ext_no_fast();
-  msg_multihl(NIL, msg, "lua_print", true, false, NULL, &needs_clear);
+  msg_multihl(NIL, msg, "lua_print", true, false, NULL, &needs_clear, raw);
 }
 
 /// Implements Lua print() as a Nvim message.
@@ -1063,12 +1134,6 @@ static void nlua_print_event(void **argv)
 static int nlua_print(lua_State *const lstate)
   FUNC_ATTR_NONNULL_ALL
 {
-#define PRINT_ERROR(msg) \
-  do { \
-    errmsg = msg; \
-    errmsg_len = sizeof(msg) - 1; \
-    goto nlua_print_error; \
-  } while (0)
   const int nargs = lua_gettop(lstate);
   lua_getglobal(lstate, "tostring");
   const char *errmsg = NULL;
@@ -1080,22 +1145,21 @@ static int nlua_print(lua_State *const lstate)
     lua_pushvalue(lstate, -1);  // tostring
     lua_pushvalue(lstate, curargidx);  // arg
     // Do not use nlua_pcall here to avoid duplicate stack trace information
-    if (lua_pcall(lstate, 1, 1, 0)) {
-      errmsg = lua_tolstring(lstate, -1, &errmsg_len);
+    if (lua_pcall(lstate, 1, 1, 0) || lua_type(lstate, -1) != LUA_TSTRING) {
+      // NB: this might try tostring once more to print a weird error from
+      // a __tostring methamethod but we stop after that.
+      errmsg = nlua_get_error(lstate, &errmsg_len);
       goto nlua_print_error;
     }
+
     size_t len;
     const char *const s = lua_tolstring(lstate, -1, &len);
-    if (s == NULL) {
-      PRINT_ERROR("<Unknown error: lua_tolstring returned NULL for tostring result>");
-    }
     ga_concat_len(&msg_ga, s, len);
     if (curargidx < nargs) {
       ga_append(&msg_ga, ' ');
     }
     lua_pop(lstate, 1);
   }
-#undef PRINT_ERROR
   ga_append(&msg_ga, NUL);
 
   lua_getfield(lstate, LUA_REGISTRYINDEX, "nvim.thread");
@@ -2217,7 +2281,7 @@ char *nlua_register_table_as_callable(const typval_T *const arg)
 }
 
 /// @return true to discard the key
-bool nlua_execute_on_key(int c, char *typed_buf)
+bool nlua_exec_on_key(int c, char *typed_buf)
 {
   static bool recursive = false;
 
@@ -2406,7 +2470,7 @@ int nlua_do_ucmd(ucmd_T *cmd, exarg_T *eap, bool preview)
 /// String representation of a Lua function reference
 ///
 /// @return Allocated string
-char *nlua_funcref_str(LuaRef ref, Arena *arena)
+char *nlua_funcref_str(LuaRef ref, Arena *arena, bool show_ref)
 {
   lua_State *const lstate = global_lstate;
 
@@ -2422,13 +2486,14 @@ char *nlua_funcref_str(LuaRef ref, Arena *arena)
   lua_Debug ar;
   if (lua_getinfo(lstate, ">S", &ar) && *ar.source == '@' && ar.linedefined >= 0) {
     char *src = home_replace_save(NULL, ar.source + 1);
-    String str = arena_printf(arena, "<Lua %d: %s:%d>", ref, src, ar.linedefined);
+    String str = show_ref ? arena_printf(arena, "<Lua %d: %s:%d>", ref, src, ar.linedefined)
+                          : arena_printf(arena, "<Lua %s:%d>", src, ar.linedefined);
     xfree(src);
     return str.data;
   }
 
 plain: {}
-  return arena_printf(arena, "<Lua %d>", ref).data;
+  return show_ref ? arena_printf(arena, "<Lua %d>", ref).data : arena_printf(arena, "<Lua>").data;
 }
 
 /// Execute the vim._core.defaults module to set up default mappings and autocommands
